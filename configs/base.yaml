@@ -1,0 +1,50 @@
+seed: 42
+
+data:
+  daily_path: data/daily.parquet
+  intraday_path: data/intraday_5m.parquet
+  out_path: data/world_model_samples.npz
+  symbol_col: symbol
+  timestamp_col: timestamp
+  daily_lookback: 40
+  intraday_lookback: 455
+  horizons_5m: [1, 3, 12, 78]
+  min_price: 1.0
+  timezone: America/New_York
+
+split:
+  train_start: 2015-01-01
+  train_end: 2024-12-31
+  val_start: 2025-01-01
+  val_end: 2025-12-31
+  test_start: 2026-01-01
+  test_end: 2026-12-31
+
+model:
+  d_model: 128
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 256
+  dropout: 0.10
+  latent_dim: 64
+  num_regimes: 64
+  stock_embedding_dim: 32
+  dynamics_hidden: 128
+  return_hidden: 128
+
+train:
+  batch_size: 256
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  patience: 5
+  device: auto
+  num_workers: 0
+  checkpoint: artifacts/best.pt
+
+loss:
+  return_weight: 1.0
+  dynamics_weight: 0.5
+  vq_weight: 0.25
+  entropy_weight: 0.01
