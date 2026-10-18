@@ -38,26 +38,52 @@ class SequenceEncoder(nn.Module):
 
 
 class VectorQuantizer(nn.Module):
-    def __init__(self, num_codes: int, dim: int, beta: float = 0.25):
+    """Cosine VQ (latents and codes on the unit sphere) with EMA usage tracking and dead-code restarts."""
+
+    def __init__(self, num_codes: int, dim: int, beta: float = 0.25, temperature: float = 0.1,
+                 usage_decay: float = 0.99, dead_threshold: float = 1e-3):
         super().__init__()
         self.embedding = nn.Embedding(num_codes, dim)
-        nn.init.uniform_(self.embedding.weight, -1.0 / num_codes, 1.0 / num_codes)
+        nn.init.normal_(self.embedding.weight)
         self.beta = beta
+        self.temperature = temperature
+        self.usage_decay = usage_decay
+        self.dead_threshold = dead_threshold
+        self.register_buffer("usage", torch.full((num_codes,), 1.0 / num_codes))
+
+    def codebook(self):
+        return F.normalize(self.embedding.weight, dim=-1)
 
     def forward(self, z):
-        # squared Euclidean distance to codebook
-        dist = (
-            z.pow(2).sum(1, keepdim=True)
-            - 2 * z @ self.embedding.weight.t()
-            + self.embedding.weight.pow(2).sum(1).unsqueeze(0)
-        )
+        z = F.normalize(z, dim=-1)
+        codes = self.codebook()
+        # squared Euclidean distance on the unit sphere = 2 - 2*cos
+        dist = 2.0 - 2.0 * z @ codes.t()
         ids = dist.argmin(dim=1)
-        z_q = self.embedding(ids)
+        z_q = codes[ids]
         codebook_loss = F.mse_loss(z_q, z.detach())
         commit_loss = F.mse_loss(z, z_q.detach())
         vq_loss = codebook_loss + self.beta * commit_loss
         z_st = z + (z_q - z).detach()
-        return z_st, ids, vq_loss, dist
+        # Soft assignments give the code-usage entropy a gradient; hard argmin ids do not.
+        probs = torch.softmax(-dist / self.temperature, dim=-1)
+        if self.training:
+            with torch.no_grad():
+                frac = torch.bincount(ids, minlength=self.usage.numel()).float() / ids.numel()
+                self.usage.mul_(self.usage_decay).add_(frac, alpha=1 - self.usage_decay)
+        return z_st, ids, vq_loss, dist, probs
+
+    @torch.no_grad()
+    def restart_dead_codes(self, z_e) -> int:
+        """Re-seed codes whose EMA usage fell below threshold with random encoder outputs. Call after opt.step()."""
+        dead = torch.nonzero(self.usage < self.dead_threshold).flatten()
+        if dead.numel() == 0 or z_e.size(0) == 0:
+            return 0
+        pick = torch.randint(0, z_e.size(0), (dead.numel(),), device=z_e.device)
+        noise = 0.01 * torch.randn_like(z_e[pick])
+        self.embedding.weight[dead] = F.normalize(z_e[pick], dim=-1) + noise
+        self.usage[dead] = 1.0 / self.usage.numel()
+        return int(dead.numel())
 
 
 class MarketWorldModel(nn.Module):
@@ -72,7 +98,9 @@ class MarketWorldModel(nn.Module):
             nn.Linear(fusion_in, cfg["dynamics_hidden"]), nn.GELU(), nn.LayerNorm(cfg["dynamics_hidden"]),
             nn.Linear(cfg["dynamics_hidden"], cfg["latent_dim"]),
         )
-        self.vq = VectorQuantizer(cfg["num_regimes"], cfg["latent_dim"])
+        self.vq = VectorQuantizer(cfg["num_regimes"], cfg["latent_dim"],
+                                  temperature=cfg.get("vq_temperature", 0.1),
+                                  dead_threshold=cfg.get("vq_dead_threshold", 1e-3))
         dyn_in = cfg["latent_dim"] + cfg["stock_embedding_dim"]
         self.next_regime = nn.Sequential(
             nn.Linear(dyn_in, cfg["dynamics_hidden"]), nn.GELU(),
@@ -90,11 +118,11 @@ class MarketWorldModel(nn.Module):
         si = self.intra_enc(intraday)
         se = self.stock_emb(symbol_id)
         z_e = self.to_latent(torch.cat([sd, si, se], dim=-1))
-        z_q, regime_id, vq_loss, dist = self.vq(z_e)
-        return z_q, regime_id, vq_loss, dist, se
+        z_q, regime_id, vq_loss, dist, probs = self.vq(z_e)
+        return z_q, regime_id, vq_loss, dist, se, z_e, probs
 
     def forward(self, daily, intraday, symbol_id):
-        z, regime, vq_loss, dist, se = self.encode(daily, intraday, symbol_id)
+        z, regime, vq_loss, dist, se, z_e, probs = self.encode(daily, intraday, symbol_id)
         x = torch.cat([z, se], dim=-1)
         next_logits = self.next_regime(x)
         ret = self.return_head(x).view(-1, self.num_horizons, 2)
@@ -105,6 +133,8 @@ class MarketWorldModel(nn.Module):
             "regime": regime,
             "vq_loss": vq_loss,
             "regime_dist": dist,
+            "regime_probs": probs,
+            "z_e": z_e,
             "next_regime_logits": next_logits,
             "return_mu": mu,
             "return_log_sigma": log_sigma,
