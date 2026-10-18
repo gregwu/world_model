@@ -1,0 +1,118 @@
+# Postgres-backed run (scripts/export_from_db.py). yahoo5m only covers 2026-01-12 onward,
+# so train/val/test all sit inside 2026 instead of the 2015-2024 / 2025 / 2026 split in base.yaml.
+seed: 42
+
+data:
+  daily_path: data/daily.parquet
+  intraday_path: data/intraday_5m.parquet
+  daily_indicators_path: data/indicators_daily.parquet
+  # Causal indicators only. Excluded: realized_*/mfe_1d* (future outcomes), p_*/pred_* (other models'
+  # predictions, possibly fit on future data), net (undocumented), m_width (all null).
+  daily_indicator_columns:
+    - rsi_14
+    - adx_14
+    - stoch_k
+    - stoch_d
+    - macd_zscore
+    - macd_signal_zscore
+    - macd_hist_zscore
+    - macd_momentum_zscore
+    - macd_slope_5d
+    - macd_signal_slope_5d
+    - price_to_ema_20_pct
+    - price_to_ema_50_pct
+    - price_to_ema_200_pct
+    - price_to_sma5_pct
+    - sma_5_slope_pct
+    - sma_20_slope_pct
+    - sma_50_slope_pct
+    - sma_144_slope_pct
+    - sma5_slope_5d
+    - price_momentum_slope_5d
+    - pct_off_high_14d
+    - pct_off_low_14d
+    - atr_to_price_ratio
+    - volatility_20
+    - price_volatility
+    - bb_std_pct
+    - vri_10
+    - vri_20
+    - volume_ratio
+    - volume_momentum
+    - volume_ratio_lag_5
+    - obv_roc_20
+    - obv_momentum_zscore
+    - cmf_10
+    - cmf_20
+    - price_to_vwap_pct
+    - d_pctb
+    - d_width
+    - w_pctb
+    - w_width
+    - m_pctb
+    - chg_1d
+    - chg_3d
+    - chg_5d
+    - chg_10d
+    - chg_21d
+    - run_len
+    - d_pctb_chg1
+    - d_pctb_chg5
+    - w_pctb_chg1
+    - w_pctb_chg5
+    - m_pctb_chg1
+    - m_pctb_chg5
+    - off_hi10
+    - off_lo10
+    - off_hi20
+    - off_lo20
+    - since_up
+    - since_dn
+    - rsi_7
+  out_path: data/world_model_samples.npz
+  symbol_col: symbol
+  timestamp_col: timestamp
+  daily_lookback: 40
+  intraday_lookback: 455
+  horizons_5m: [1, 3, 12, 78]
+  min_price: 1.0
+  timezone: America/New_York
+
+split:
+  train_start: "2026-01-12"
+  train_end: "2026-06-30"
+  val_start: "2026-07-01"
+  val_end: "2026-08-15"
+  test_start: "2026-08-16"
+  test_end: "2026-10-16"
+
+model:
+  d_model: 128
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 256
+  dropout: 0.10
+  latent_dim: 64
+  num_regimes: 64
+  vq_temperature: 0.1
+  vq_dead_threshold: 0.001
+  stock_embedding_dim: 32
+  dynamics_hidden: 128
+  return_hidden: 128
+
+train:
+  batch_size: 256
+  epochs: 15
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  patience: 4
+  device: auto
+  num_workers: 0
+  checkpoint: artifacts/best.pt
+
+loss:
+  return_weight: 1.0
+  dynamics_weight: 0.5
+  vq_weight: 0.25
+  entropy_weight: 0.1

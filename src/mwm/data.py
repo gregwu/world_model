@@ -31,6 +31,21 @@ def _load_bars(path: str, timestamp_col: str = "timestamp") -> pd.DataFrame:
     return df
 
 
+def _merge_daily_indicators(daily: pd.DataFrame, path: str, columns: list[str]) -> pd.DataFrame:
+    """Join per-day indicators (symbol,date,...) onto daily bars by symbol and New York calendar date."""
+    ind = pd.read_parquet(path)
+    missing = set(columns) - set(ind.columns)
+    if missing:
+        raise ValueError(f"Missing indicator columns in {path}: {sorted(missing)}")
+    ind = ind[["symbol", "date", *columns]].copy()
+    ind["date"] = pd.to_datetime(ind["date"]).dt.date
+    daily = daily.copy()
+    daily["date"] = daily["timestamp"].dt.tz_convert("America/New_York").dt.date
+    out = daily.merge(ind, on=["symbol", "date"], how="left").drop(columns="date")
+    out[columns] = out[columns].replace([np.inf, -np.inf], np.nan)
+    return out
+
+
 def build_samples(
     daily_path: str,
     intraday_path: str,
@@ -38,16 +53,24 @@ def build_samples(
     intraday_lookback: int = 455,
     horizons_5m: tuple[int, ...] = (1, 3, 12, 78),
     min_price: float = 1.0,
+    daily_indicators_path: str | None = None,
+    daily_indicator_columns: list[str] | None = None,
 ) -> SamplePack:
     """
     Build aligned samples ending on each 5-minute bar.
     Daily context uses completed daily bars strictly before the sample date.
     Intraday context uses bars up to and including t.
     Targets are future log returns from close_t to close_{t+h}.
+    Optional daily indicators are appended to the daily features only; a day's indicators
+    are computed from that day's close, so the strictly-before cutoff keeps them causal.
     """
     daily = add_bar_features(_load_bars(daily_path))
     intra = add_bar_features(_load_bars(intraday_path))
     feats = feature_columns()
+    daily_feats = list(feats)
+    if daily_indicators_path and daily_indicator_columns:
+        daily = _merge_daily_indicators(daily, daily_indicators_path, list(daily_indicator_columns))
+        daily_feats += list(daily_indicator_columns)
     symbols = sorted(set(daily.symbol.unique()) & set(intra.symbol.unique()))
     symbol_to_id = {s: i for i, s in enumerate(symbols)}
 
@@ -64,7 +87,7 @@ def build_samples(
             continue
         daily_dates = dg["timestamp"].dt.tz_convert("America/New_York").dt.date.to_numpy()
         intra_dates = ig["timestamp"].dt.tz_convert("America/New_York").dt.date.to_numpy()
-        dvals = dg[feats].to_numpy(np.float32)
+        dvals = dg[daily_feats].to_numpy(np.float32)
         ivals = ig[feats].to_numpy(np.float32)
         closes = ig["close"].to_numpy(np.float64)
 
@@ -122,6 +145,7 @@ class WorldModelDataset(Dataset):
     def __init__(self, npz_path: str, start: str, end: str, stats: dict | None = None):
         z = np.load(npz_path, allow_pickle=True)
         ts = pd.to_datetime(z["timestamps_ns"], utc=True)
+        start, end = str(start), str(end)  # YAML parses unquoted dates as datetime.date
         mask = (ts >= pd.Timestamp(start, tz="UTC")) & (ts <= pd.Timestamp(end + " 23:59:59", tz="UTC"))
         idx = np.flatnonzero(mask)
         self.daily = z["daily"][idx]

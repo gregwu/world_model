@@ -45,6 +45,39 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+### From the local Postgres
+
+```bash
+python scripts/export_from_db.py                 # 20 liquid tickers by default
+python scripts/export_from_db.py --tickers SPY,QQQ,AAPL --daily-start 2024-01-01
+```
+
+Reads `DATABASE_URL` from `.env` and writes:
+
+| Source table | Output | Notes |
+|---|---|---|
+| `ohlcv_daily` | `data/daily.parquet` | bare tickers (`AAPL`) |
+| `indicators_daily` | `data/indicators_daily.parquet` | per-day indicators, joined onto daily bars by symbol + New York date |
+| `yahoo5m` | `data/intraday_5m.parquet` | `.US` suffix stripped; **09:30-16:00 ET only** |
+
+Two data facts drive the setup:
+
+- `yahoo5m` starts 2026-01-12, so the 2015-2024 train split in `base.yaml` is empty. Use `configs/db_2026.yaml`, which keeps all three splits inside 2026 (train Jan 12-Jun 30, val Jul 1-Aug 15, test Aug 16-Oct 16). This means there is no untouched multi-year test set yet.
+- About 99% of extended-hours 5m bars have zero volume, which makes the relative-volume features undefined and drops nearly every 455-bar window. The export keeps regular-session bars only.
+
+### Daily indicators
+
+When `daily_indicators_path` and `daily_indicator_columns` are set in the config, those columns are appended to the daily features (the intraday features are unchanged). The daily context uses only days strictly before the sample date, so indicators computed from a day's close stay causal.
+
+`configs/db_2026.yaml` lists 60 columns. It deliberately leaves out columns that would leak future information or are unusable:
+
+- `realized_mfe_1d`, `realized_mae_1d`, `mfe_1d`, `mfe_1d_pct_rank*`: future outcomes
+- `p_up`, `p_down`, `p_peak`, `p_bottom`, `pred_mfe_cls`, `pred_mae_cls`: other models' predictions, possibly fit on future data
+- `net`: undocumented
+- `m_width`: always null
+
+Run `pip install -e .` or set `PYTHONPATH=src` before the commands below.
+
 ## Build samples
 
 ```bash
@@ -66,6 +99,27 @@ python -m mwm.train --config configs/base.yaml
 ```
 
 On Apple Silicon the trainer automatically chooses MPS when available; CUDA is preferred when present.
+
+Each epoch prints one JSON line. Besides the losses it reports:
+
+- `entropy`: soft code-usage entropy (the term the loss maximizes)
+- `usage_entropy`: hard-assignment usage entropy, normalized to 0-1. A value near 0 means the regime codebook has collapsed onto one or two codes.
+- `code_restarts`: how many dead codes were re-seeded during the epoch
+
+### Regime codebook
+
+The first version collapsed: every sample mapped to a single regime, and the transition graph had one edge. Two causes:
+
+1. The usage-entropy term was computed from hard `argmin` ids, so it had no gradient and `entropy_weight` had no effect.
+2. Nothing stopped codes from going unused. The dynamics loss even rewards collapse, because predicting the next regime is trivial when only one regime exists.
+
+The vector quantizer now:
+
+- L2-normalizes latents and codes (cosine VQ);
+- exposes soft assignments `softmax(-dist / vq_temperature)` so the entropy term has a gradient;
+- tracks per-code usage with an EMA, and after each optimizer step re-seeds any code whose usage falls below `vq_dead_threshold` from a random latent in the batch.
+
+`db_2026.yaml` raises `entropy_weight` to 0.1 now that the term has an effect.
 
 ## Evaluate frozen 2026 test
 
