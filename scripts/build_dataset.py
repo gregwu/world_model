@@ -7,7 +7,8 @@ ap=argparse.ArgumentParser(); ap.add_argument("--config",default="configs/base.y
 cfg=yaml.safe_load(open(args.config)); d=cfg["data"]
 if d.get("format")=="lazy":  # out_path is a directory; see mwm/lazy.py
     meta=build_lazy_pack(d["out_path"],d["daily_path"],d["intraday_path"],d["daily_lookback"],d["intraday_lookback"],
-                         tuple(d["horizons_5m"]),d["min_price"],d.get("daily_indicators_path"),d.get("daily_indicator_columns"))
+                         tuple(d["horizons_5m"]),d["min_price"],d.get("daily_indicators_path"),d.get("daily_indicator_columns"),
+                         d.get("intraday_indicators",False))
     print(f"saved lazy pack to {d['out_path']}: {meta['shapes']['anchor'][0]:,} samples across {len(meta['symbols'])} symbols, "
           f"{meta['shapes']['intra_feats'][0]:,} intraday rows; skipped {len(meta['skipped_symbols'])}: {meta['skipped_symbols'][:20]}")
     raise SystemExit

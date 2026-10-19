@@ -59,6 +59,9 @@ data:
     - off_lo20
     - since_up
     - rsi_7
+  # Appends 7 intraday features: 5m %B, RSI(14), MACD hist, session-VWAP distance; 1h %B, RSI, MACD hist
+  # (last completed 1h bar only). See features.add_intraday_indicators.
+  intraday_indicators: true
   out_path: data/alpaca5m/pack             # lazy pack directory
   daily_lookback: 40
   intraday_lookback: 455

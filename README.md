@@ -100,6 +100,8 @@ Default contexts:
 
 The builder uses causal features only: returns, range/body, close location, volume, SMA distances, relative volume, and true range.
 
+Flat bars (high == low) get `close_location = 0.5`. They were previously NaN, and any NaN drops the whole window. About 1% of 5m bars are flat, so that silently removed roughly a third of all 455-bar windows: the Alpaca pack went from 67M to 100M samples with the fix. Packs built before 2026-10-19 (daily, `db_2026`) were built with the old rule.
+
 ### Daily-only mode
 
 With `data.mode: daily` (as in `configs/daily.yaml`), samples end on each daily close and the model has no intraday encoder:
@@ -113,6 +115,39 @@ python scripts/export_from_db.py --daily-only --top-liquid 200 --daily-start 201
 python scripts/build_dataset.py --config configs/daily.yaml    # ~592k samples, ~25 s
 python -m mwm.train --config configs/daily.yaml                # ~35-80 s per epoch on the GB10
 ```
+
+### Large 5m universe from Alpaca: `configs/alpaca_5m.yaml`
+
+`yahoo5m` covers only 2026, so the large 5m model uses Alpaca's historical SIP bars instead: 2016-01-04 to 2026-10-16, split- and dividend-adjusted, regular session only.
+
+```bash
+# universe: current S&P 500 (from Wikipedia) + the 100 most liquid tickers of 2014 = 534 symbols in data/alpaca5m/universe.txt
+python scripts/download_alpaca_5m.py --tickers-file data/alpaca5m/universe.txt --end 2026-10-17 --workers 20 --out-dir data/alpaca5m/bars
+python scripts/export_from_db.py --daily-only --tickers-file data/alpaca5m/universe.txt --daily-start 2014-06-01 --out-dir data/alpaca5m
+python scripts/build_dataset.py --config configs/alpaca_5m.yaml      # lazy pack, ~13 GB, a few minutes
+python -m mwm.train --config configs/alpaca_5m.yaml                  # ~10 min per epoch on the GB10
+```
+
+Download notes:
+
+- **Rate limit:** Alpaca's free plan allows 200 requests per minute. The live and paper keys share one quota (a second key at 180/min each produced 429s), so they don't add throughput.
+- **Page size:** a page holds about 2,600 five-minute bars whatever `limit` says (the limit appears to count 1-minute source bars). A ticker therefore takes about 130 requests, and the full 534-ticker download took about 4 hours at 180 requests per minute.
+- **Recent data:** the free plan rejects SIP queries that reach into the last 15 minutes, so `--end` must be in the past; it defaults to two days ago.
+- **Resuming:** files are written atomically, one Parquet per ticker. Reruns skip finished tickers, so an interrupted run resumes.
+- **Webull is not an alternative:** its `/market-data/bars` endpoint returns at most the newest 1,200 bars, with no start or end time to page back. That is about 15 trading days of regular-hours 5m bars (see rustish `trading-platform/crates/market/src/webull.rs`).
+
+**Lazy packs** ([src/mwm/lazy.py](src/mwm/lazy.py)). Materialized windows cost about 33 KB per sample, so 100M samples would need hundreds of GB. With `data.format: lazy`, `out_path` is a directory that stores per-bar features once (memory-mapped `.npy` files) plus, for each sample, only the row its windows end on. Windows are gathered per batch. `train.samples_per_epoch` draws a fresh random subset of training pairs each epoch, and `train.val_max_samples` fixes a random validation subset. `evaluate`, `transitions` and `scripts/diagnostics.py` accept `--max-samples` / `--max-eval`.
+
+**Intraday indicators** (`data.intraday_indicators: true`, [features.py](src/mwm/features.py)) add 7 intraday features to the 12 bar features:
+
+| Timeframe | Features |
+|---|---|
+| 5m | `m5_pctb` (Bollinger %B, 20 bars, 2σ), `m5_rsi` (Wilder RSI 14, scaled 0-1), `m5_macd_hist` (MACD 12/26/9 histogram as a fraction of price), `m5_vwap_dist` (distance from the session-anchored VWAP) |
+| 1h | `h1_pctb`, `h1_rsi`, `h1_macd_hist` |
+
+1h bars are built from the 5m bars and aligned to the 09:30 open (seven per session, the last 30 minutes long). Each 5m bar sees only the last *completed* 1h bar. A truncation test (features computed on a prefix of the series equal the same rows computed on the full series) confirms every feature is causal.
+
+**bf16:** `train.amp: bf16` uses bf16 autocast on CUDA. The vector quantizer, the gated dynamics head and the return head stay in fp32. Predicted mean returns are around 1e-4, and in bf16 up to 17% of them rounded to exactly 0, which made sign-based accuracy look like a strong anti-signal (41%) that wasn't there.
 
 Each sample pack stores `bar_index` (the row of the sample's last bar within its symbol), and the dataset pairs consecutive bars through it. That replaces the old "exactly 5 minutes later" rule and works for any bar size. Packs built before this change fall back to the 5-minute rule.
 
@@ -187,6 +222,35 @@ With 64 groups and no real effect, eta² is about 63 / n, which is 0.1-0.2% for 
 
 ## Results
 
+### 5m model on Alpaca history: `configs/alpaca_5m.yaml`, 529 tickers
+
+Run on 2026-10-19. 100.1M samples across 529 tickers (S&P 500 + the 100 most liquid of 2014; `BRK.B` and `BF.B` have no daily data, and 3 recent listings have too little history). 12 bar features + 7 intraday indicators, and 60 daily features. Train 2016-2024 (81.8M pairs, 1M random pairs per epoch), validation 2025 (10.1M; fixed 200k subset during training), test 2026 (8.2M; 500k-pair subsets for evaluation). Training took about 3.5 hours: 20 epochs at ~10 minutes each, plus a 3-epoch dynamics fine-tune.
+
+Validation NLL was still improving at epoch 20 (−3.29 at epoch 1, −3.85 at epoch 20), so a longer run would probably help.
+
+Share of future |return| variance explained, test 2026:
+
+| Horizon (5m bars) | 1 | 3 | 12 | 78 |
+|---|---|---|---|---|
+| Regimes | **21.8%** | **25.3%** | **25.9%** | 11.3% |
+| 64 bins of trailing volatility | 4.8% | 5.8% | 6.9% | 10.5% |
+| Regimes, within volatility bins | 16.2% | 19.2% | 20.1% | 1.3% |
+| `db_2026` 5m model (20 tickers, 2026 only), for comparison | 8.2% | 11.3% | 12.8% | 11.1% |
+
+**At 1-12 bars the regimes explain about 4× as much as trailing volatility**, and about twice as much as the 20-ticker `db_2026` model. Most of it is information trailing volatility doesn't have. At 78 bars (one trading day) they roughly match the benchmark. Validation 2025 shows the same pattern (20.1 / 22.6 / 23.3 / 12.5% vs 7.4 / 7.8 / 9.7 / 12.0%).
+
+| | Validation 2025 | Test 2026 |
+|---|---|---|
+| Regimes used | 64 of 64 | 64 of 64 |
+| Next-regime accuracy vs persistence | 72.2% vs 71.2% | 72.5% vs 71.7% |
+| Directional accuracy on moves (1 / 3 / 12 / 78 bars) | 50.0 / 49.6 / 50.8 / 50.1% | 50.1 / 49.9 / 50.0 / 50.0% |
+| 90% interval coverage | 97.1 / 93.7 / 89.3 / 91.1% | 96.4 / 92.8 / 89.2 / 90.2% |
+| Return MAE | 0.0014 / 0.0025 / 0.0051 / 0.0145 | 0.0015 / 0.0027 / 0.0057 / 0.0166 |
+
+- **Dynamics:** this is the first model whose dynamics head beats persistence on 5m data, by about 1 point on both splits. The transition graph has 1,820 edges.
+- **Direction:** none. The predicted mean return is uncorrelated with the realized return at every horizon (|corr| ≤ 0.005). Regimes explain at most 0.1% of signed-return variance, including at 78 bars, where the 20-ticker `db_2026` model had shown 2.4%; that now looks like noise from its small universe. Last-bar momentum scores 49-50%, with a faint short-term reversal (corr about −0.006).
+- **Calibration:** intervals are too wide at 1 bar (96-97% coverage for a 90% band) and about right from 12 bars on.
+
 ### Daily model: `configs/daily.yaml`, 200 tickers
 
 Run on 2026-10-19. 592,234 samples across the 200 most liquid tickers of 2014, with 60 daily features (12 bar features plus 48 indicators). Train 2015-2024 (473k pairs), validation 2025 (49.8k), test 2026 (35.6k, evaluated once per model).
@@ -224,6 +288,12 @@ Directional accuracy of the gradient-boosting baseline against the majority dire
 | 5m val: majority class | 50.0% | 50.2% | 51.3% | 53.8% |
 | 5m test: GBM | 50.0% | 50.5% | 50.9% | 51.7% |
 | 5m test: majority class | 50.6% | 49.8% | 49.6% | 49.1% |
+| Alpaca 5m val, with %B / RSI / MACD / VWAP features: GBM | 52.2% | 51.1% | 50.8% | 51.6% |
+| Alpaca 5m val: majority class | 51.8% | 50.5% | 50.7% | 52.0% |
+| Alpaca 5m test: GBM | 52.0% | 51.2% | 50.3% | 50.5% |
+| Alpaca 5m test: majority class | 51.5% | 50.8% | 49.8% | 51.0% |
+
+The 5m rows count unchanged prices as "down", which is why the majority class can exceed 50%. On Alpaca, the GBM gets at most 0.6 points over the majority class at 1-12 bars, and is 0.4-0.5 below it at 78 bars. That's too small to trust, given how correlated the samples are (overlapping windows, tickers moving together).
 
 The GBM does worse than "always up" on daily validation at every horizon and is within noise on 5m. A simple model on the same inputs cannot predict direction either, so the world model's ~50% reflects the inputs, not a training failure.
 
@@ -268,6 +338,9 @@ Reported metrics include per-horizon:
 - 90% predictive interval coverage
 - number of latent regimes actually used
 - `next_regime_accuracy` against `persistence_accuracy` (the "stay the same" baseline)
+- `directional_accuracy_moves`: directional accuracy over samples whose price actually moved, plus `zero_return_share`, `up_share_moves` and `predicted_up_share`. Plain `directional_accuracy` counts every unchanged price as a miss, which on 5m bars pulls it below 50% by itself.
+
+`--max-samples N` evaluates a fixed random subset of pairs, which large lazy packs need.
 
 ## Build latent transition graph
 
@@ -314,7 +387,7 @@ G  learned latent alignment between A and D/E/F
 
 Promote a new encoder only if it improves validation NLL / calibration / trading utility and then confirms once on frozen 2026.
 
-The daily model is the better place to start. It has the intended multi-year split, trains in minutes, and its regimes now match the volatility benchmark. The 5m regimes are stronger (they beat the benchmark at every horizon) but cover only nine months of 2026, so treat them as a second check rather than the main testbed. Since neither the world model nor the GBM baseline predicts direction, judge new encoders on regime quality and volatility explained, not only on directional accuracy.
+The Alpaca 5m model is now the strongest testbed: it has the intended 2016-2024 / 2025 / 2026 split, 529 tickers, and regimes that explain about 4× as much short-horizon volatility as trailing volatility. It takes hours to train, though. The daily model trains in minutes and is the quicker place to try an encoder before confirming on 5m. Since neither the world model nor the GBM baseline predicts direction, judge new encoders on regime quality and volatility explained, not only on directional accuracy.
 
 ## Important modeling note
 

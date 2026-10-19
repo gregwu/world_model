@@ -171,7 +171,10 @@ class MarketWorldModel(nn.Module):
             next_logits = torch.log(g * p_stay + (1 - g) * p_move + 1e-8)  # log-probs; cross_entropy accepts them as logits
         else:
             next_logits = self.next_regime(x)
-        ret = self.return_head(x).view(-1, self.num_horizons, 2)
+        # fp32 even under bf16 autocast: predicted mean returns are ~1e-4, and bf16 rounded up to 17% of them to
+        # exactly 0, which broke sign-based metrics (a zero sign never matches the realized sign).
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            ret = self.return_head(x.float()).view(-1, self.num_horizons, 2)
         mu = ret[..., 0]
         log_sigma = ret[..., 1].clamp(-6.0, 3.0)
         return {

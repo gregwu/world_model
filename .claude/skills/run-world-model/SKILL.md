@@ -43,6 +43,22 @@ python3 -m mwm.train --config configs/daily.yaml --dynamics-only                
 python3 scripts/diagnostics.py --config configs/daily.yaml --checkpoint artifacts/daily/best.pt   # GBM baseline + regime eta^2
 ```
 
+Large 5m model on Alpaca history (2016-2026, 534 tickers; download ~4 h, pack ~13 GB, training ~10 min/epoch):
+
+```bash
+PYTHONPATH=scripts python3 -u scripts/download_alpaca_5m.py --tickers-file data/alpaca5m/universe.txt --end <2+ days ago> --workers 20 --out-dir data/alpaca5m/bars
+python3 scripts/export_from_db.py --daily-only --tickers-file data/alpaca5m/universe.txt --daily-start 2014-06-01 --out-dir data/alpaca5m
+python3 scripts/build_dataset.py --config configs/alpaca_5m.yaml
+python3 -u -m mwm.train --config configs/alpaca_5m.yaml > artifacts/alpaca5m/train.log 2>&1
+python3 -m mwm.evaluate --checkpoint artifacts/alpaca5m/best.pt --split test --max-samples 500000
+python3 scripts/diagnostics.py --config configs/alpaca_5m.yaml --checkpoint artifacts/alpaca5m/best.pt --max-eval 300000 --max-train 300000
+```
+
+The downloader needs `PYTHONPATH=scripts` and the repo root as cwd (it reads `.env`). Alpaca allows 200 req/min shared by
+the live and paper keys; `--end` must not reach the last 15 minutes. Judge direction with `directional_accuracy_moves`, not
+`directional_accuracy` (unchanged prices count as misses). When waiting on a process with `pgrep -f`, the waiting
+shell's own command line can match the pattern; check `ps` for the python process instead.
+
 Always use `python3 -u` when redirecting training output, or the epoch lines only appear at exit. When killing a
 training run, kill by PID: `pkill -f "mwm.train ..."` also matches the shell running it. Killed runs can leave
 orphaned data-loader workers (ppid 1) behind; check `ps -eo pid,ppid,cmd | grep mwm.train`.

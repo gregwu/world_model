@@ -31,9 +31,16 @@ def main():
     y=np.concatenate(ys); mu=np.concatenate(mus); sd=np.concatenate(sigmas); r=np.concatenate(regimes)
     nxt=np.concatenate(nexts); nxt_pred=np.concatenate(next_preds)
     mae=np.mean(np.abs(y-mu),axis=0); dir_acc=np.mean(np.sign(y)==np.sign(mu),axis=0)
+    # Unchanged prices (y == 0) can never match a nonzero predicted sign; on 5m bars they are common, so also report
+    # accuracy over moves only, and how often the price did not move.
+    moved=y!=0; zero_share=1-moved.mean(axis=0)
+    dir_acc_moves=np.array([np.mean(np.sign(y[moved[:,h],h])==np.sign(mu[moved[:,h],h])) for h in range(y.shape[1])])
+    up_share_moves=np.array([np.mean(y[moved[:,h],h]>0) for h in range(y.shape[1])])
     coverage=np.mean((y>=mu-1.645*sd)&(y<=mu+1.645*sd),axis=0)
     uniq,counts=np.unique(r,return_counts=True)
-    result={"n":len(y),"mae":mae.tolist(),"directional_accuracy":dir_acc.tolist(),"p90_interval_coverage":coverage.tolist(),
+    result={"n":len(y),"mae":mae.tolist(),"directional_accuracy":dir_acc.tolist(),
+            "zero_return_share":zero_share.tolist(),"directional_accuracy_moves":dir_acc_moves.tolist(),
+            "up_share_moves":up_share_moves.tolist(),"predicted_up_share":np.mean(mu>0,axis=0).tolist(),"p90_interval_coverage":coverage.tolist(),
             "regimes_used":int(len(uniq)),"top_regimes":sorted(zip(uniq.tolist(),counts.tolist()),key=lambda x:x[1],reverse=True)[:10],
             "next_regime_accuracy":float(np.mean(nxt_pred==nxt)),"persistence_accuracy":float(np.mean(r==nxt))}
     print(json.dumps(result,indent=2))

@@ -22,7 +22,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from .data import NORM_CLIP, _load_bars, _load_daily, _utc_ns, pair_next
-from .features import add_bar_features, feature_columns
+from .features import add_bar_features, add_intraday_indicators, feature_columns, intraday_indicator_columns
 
 NY = "America/New_York"
 
@@ -61,11 +61,14 @@ def build_lazy_pack(
     min_price: float = 1.0,
     daily_indicators_path: str | None = None,
     daily_indicator_columns: list[str] | None = None,
+    intraday_indicators: bool = False,
 ) -> dict:
-    """Same sample definition as data.build_samples (daily context strictly before the sample date), stored lazily."""
+    """Same sample definition as data.build_samples (daily context strictly before the sample date), stored lazily.
+    intraday_indicators appends 5m/1h %B, RSI, MACD histogram and 5m session-VWAP distance (features.py)."""
     daily, daily_feats = _load_daily(daily_path, daily_indicators_path, daily_indicator_columns)
     dgroups = {s: g.reset_index(drop=True) for s, g in daily.groupby("symbol")}
-    feats = feature_columns(); H = np.asarray(horizons_5m); max_h = int(H.max())
+    feats = feature_columns() + (intraday_indicator_columns() if intraday_indicators else [])
+    H = np.asarray(horizons_5m); max_h = int(H.max())
     L, Ld = intraday_lookback, daily_lookback
     symbols, skipped = [], []
     chunks = {k: [] for k in ("intra_feats", "intra_ts", "daily_feats", "daily_ts", "anchor", "daily_end",
@@ -76,6 +79,8 @@ def build_lazy_pack(
         if dg is None or len(ig) < L + max_h:
             skipped.append(sym); continue
         ig = add_bar_features(ig)
+        if intraday_indicators:
+            ig = add_intraday_indicators(ig)
         ivals = ig[feats].to_numpy(np.float32); closes = ig["close"].to_numpy(np.float64); stamps = _utc_ns(ig["timestamp"])
         dvals = dg[daily_feats].to_numpy(np.float32)
         idates = ig["timestamp"].dt.tz_convert(NY).dt.date.to_numpy()
