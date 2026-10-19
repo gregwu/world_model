@@ -1,0 +1,106 @@
+# Daily-only world model on 200 tickers (scripts/export_from_db.py --daily-only --top-liquid 200 --out-dir data/daily200).
+# ohlcv_daily/indicators_daily go back decades, so this uses the intended split: train 2015-2024, val 2025, frozen test 2026.
+seed: 42
+
+data:
+  mode: daily
+  daily_path: data/daily200/daily.parquet
+  daily_indicators_path: data/daily200/indicators_daily.parquet
+  # Causal indicators from db_2026.yaml minus columns with >2% nulls in 2024/2025:
+  # macd_momentum_zscore, sma_144_slope_pct, obv_momentum_zscore, d_width, w_pctb, w_width, m_pctb, w_pctb_chg1, w_pctb_chg5, m_pctb_chg1, m_pctb_chg5, since_dn.
+  # indicators_daily also has no rows for any ticker 2023-08-10..2023-11-01; windows touching it are dropped.
+  daily_indicator_columns:
+    - rsi_14
+    - adx_14
+    - stoch_k
+    - stoch_d
+    - macd_zscore
+    - macd_signal_zscore
+    - macd_hist_zscore
+    - macd_slope_5d
+    - macd_signal_slope_5d
+    - price_to_ema_20_pct
+    - price_to_ema_50_pct
+    - price_to_ema_200_pct
+    - price_to_sma5_pct
+    - sma_5_slope_pct
+    - sma_20_slope_pct
+    - sma_50_slope_pct
+    - sma5_slope_5d
+    - price_momentum_slope_5d
+    - pct_off_high_14d
+    - pct_off_low_14d
+    - atr_to_price_ratio
+    - volatility_20
+    - price_volatility
+    - bb_std_pct
+    - vri_10
+    - vri_20
+    - volume_ratio
+    - volume_momentum
+    - volume_ratio_lag_5
+    - obv_roc_20
+    - cmf_10
+    - cmf_20
+    - price_to_vwap_pct
+    - d_pctb
+    - chg_1d
+    - chg_3d
+    - chg_5d
+    - chg_10d
+    - chg_21d
+    - run_len
+    - d_pctb_chg1
+    - d_pctb_chg5
+    - off_hi10
+    - off_lo10
+    - off_hi20
+    - off_lo20
+    - since_up
+    - rsi_7
+  out_path: data/daily200/world_model_samples.npz
+  daily_lookback: 40
+  horizons_days: [1, 5, 20]
+  min_price: 1.0
+
+split:
+  train_start: "2015-01-01"
+  train_end: "2024-12-31"
+  val_start: "2025-01-01"
+  val_end: "2025-12-31"
+  test_start: "2026-01-01"
+  test_end: "2026-12-31"
+
+model:
+  d_model: 128
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 256
+  dropout: 0.10
+  latent_dim: 64
+  num_regimes: 64
+  vq_temperature: 0.1
+  vq_dead_threshold: 0.001
+  stock_embedding_dim: 32
+  dynamics_hidden: 128
+  dynamics_head: gated  # p(next) = g*p(stay) + (1-g)*p(move); see model.py
+  return_hidden: 128
+
+train:
+  batch_size: 512
+  epochs: 30
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  patience: 5
+  vq_restart_epochs: 30  # every epoch: the gated dynamics head tolerates code re-seeding
+  dynamics_finetune_epochs: 5  # stage 2: fit only the dynamics head on the frozen best checkpoint
+  device: auto
+  num_workers: 2
+  checkpoint: artifacts/daily/best.pt
+
+loss:
+  return_weight: 1.0
+  dynamics_weight: 0.5
+  vq_weight: 0.25
+  entropy_weight: 0.1

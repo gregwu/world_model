@@ -98,6 +98,7 @@ model:
   vq_dead_threshold: 0.001
   stock_embedding_dim: 32
   dynamics_hidden: 128
+  dynamics_head: gated  # p(next) = g*p(stay) + (1-g)*p(move); see model.py
   return_hidden: 128
 
 train:
@@ -107,9 +108,11 @@ train:
   weight_decay: 0.0001
   grad_clip: 1.0
   patience: 4
+  vq_restart_epochs: 30  # every epoch: the gated dynamics head tolerates code re-seeding
+  dynamics_finetune_epochs: 5  # stage 2: fit only the dynamics head on the frozen best checkpoint
   device: auto
-  num_workers: 0
-  checkpoint: artifacts/best.pt
+  num_workers: 2
+  checkpoint: artifacts/5m/best.pt
 
 loss:
   return_weight: 1.0

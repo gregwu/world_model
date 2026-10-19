@@ -74,16 +74,15 @@ class VectorQuantizer(nn.Module):
         return z_st, ids, vq_loss, dist, probs
 
     @torch.no_grad()
-    def restart_dead_codes(self, z_e) -> int:
-        """Re-seed codes whose EMA usage fell below threshold with random encoder outputs. Call after opt.step()."""
-        dead = torch.nonzero(self.usage < self.dead_threshold).flatten()
-        if dead.numel() == 0 or z_e.size(0) == 0:
-            return 0
+    def restart_dead_codes(self, z_e) -> torch.Tensor:
+        """Re-seed codes whose EMA usage fell below threshold with random encoder outputs. Call after opt.step().
+        Mask-based so it never forces a host sync; returns the number of restarted codes as a device tensor."""
+        dead = self.usage < self.dead_threshold
         pick = torch.randint(0, z_e.size(0), (dead.numel(),), device=z_e.device)
-        noise = 0.01 * torch.randn_like(z_e[pick])
-        self.embedding.weight[dead] = F.normalize(z_e[pick], dim=-1) + noise
-        self.usage[dead] = 1.0 / self.usage.numel()
-        return int(dead.numel())
+        fresh = F.normalize(z_e[pick], dim=-1) + 0.01 * torch.randn_like(z_e[pick])
+        self.embedding.weight.copy_(torch.where(dead[:, None], fresh, self.embedding.weight))
+        self.usage.copy_(torch.where(dead, torch.full_like(self.usage, 1.0 / self.usage.numel()), self.usage))
+        return dead.sum()
 
 
 class MarketWorldModel(nn.Module):
@@ -91,9 +90,11 @@ class MarketWorldModel(nn.Module):
         super().__init__()
         d = cfg["d_model"]
         self.daily_enc = SequenceEncoder(daily_dim, d, cfg["nhead"], cfg["num_layers"], cfg["dim_feedforward"], cfg["dropout"])
-        self.intra_enc = SequenceEncoder(intra_dim, d, cfg["nhead"], cfg["num_layers"], cfg["dim_feedforward"], cfg["dropout"])
+        # intra_dim == 0 builds a daily-only model
+        self.intra_enc = (SequenceEncoder(intra_dim, d, cfg["nhead"], cfg["num_layers"], cfg["dim_feedforward"], cfg["dropout"])
+                          if intra_dim > 0 else None)
         self.stock_emb = nn.Embedding(num_symbols, cfg["stock_embedding_dim"])
-        fusion_in = d * 2 + cfg["stock_embedding_dim"]
+        fusion_in = d * (2 if self.intra_enc is not None else 1) + cfg["stock_embedding_dim"]
         self.to_latent = nn.Sequential(
             nn.Linear(fusion_in, cfg["dynamics_hidden"]), nn.GELU(), nn.LayerNorm(cfg["dynamics_hidden"]),
             nn.Linear(cfg["dynamics_hidden"], cfg["latent_dim"]),
@@ -106,6 +107,27 @@ class MarketWorldModel(nn.Module):
             nn.Linear(dyn_in, cfg["dynamics_hidden"]), nn.GELU(),
             nn.Linear(cfg["dynamics_hidden"], cfg["num_regimes"]),
         )
+        # "latent" dynamics: predict the next latent as z + residual(z, stock) and score it against the current
+        # codebook. Zero-initialized residual => starts exactly at persistence, and logits stay tied to the codebook
+        # geometry, so code re-seeding/drift doesn't scramble what the head has learned (unlike id-space logits).
+        self.dynamics_head = cfg.get("dynamics_head", "logits")
+        if self.dynamics_head == "latent":
+            self.next_latent = nn.Sequential(
+                nn.Linear(dyn_in, cfg["dynamics_hidden"]), nn.GELU(),
+                nn.Linear(cfg["dynamics_hidden"], cfg["latent_dim"]),
+            )
+            nn.init.zeros_(self.next_latent[-1].weight); nn.init.zeros_(self.next_latent[-1].bias)
+            # Learnable inverse temperature: lets the head express uncertainty by flattening its distribution
+            # instead of moving z_next toward an average of next codes (which flips the argmax away from "stay").
+            self.dynamics_log_scale = nn.Parameter(torch.tensor(math.log(1.0 / cfg.get("vq_temperature", 0.1))))
+        # "gated" dynamics: p(next) = g * p(stay in current regime) + (1 - g) * softmax(move logits), with a
+        # per-sample learned gate initialized to ~0.95. Starts at persistence; id-space drift only affects "move".
+        if self.dynamics_head == "gated":
+            self.stay_gate = nn.Sequential(
+                nn.Linear(dyn_in, cfg["dynamics_hidden"]), nn.GELU(),
+                nn.Linear(cfg["dynamics_hidden"], 1),
+            )
+            nn.init.zeros_(self.stay_gate[-1].weight); nn.init.constant_(self.stay_gate[-1].bias, 3.0)
         ret_in = cfg["latent_dim"] + cfg["stock_embedding_dim"]
         self.return_head = nn.Sequential(
             nn.Linear(ret_in, cfg["return_hidden"]), nn.GELU(),
@@ -114,17 +136,37 @@ class MarketWorldModel(nn.Module):
         self.num_horizons = num_horizons
 
     def encode(self, daily, intraday, symbol_id):
-        sd = self.daily_enc(daily)
-        si = self.intra_enc(intraday)
+        parts = [self.daily_enc(daily)]
+        if self.intra_enc is not None:
+            parts.append(self.intra_enc(intraday))
         se = self.stock_emb(symbol_id)
-        z_e = self.to_latent(torch.cat([sd, si, se], dim=-1))
+        z_e = self.to_latent(torch.cat([*parts, se], dim=-1))
         z_q, regime_id, vq_loss, dist, probs = self.vq(z_e)
         return z_q, regime_id, vq_loss, dist, se, z_e, probs
 
     def forward(self, daily, intraday, symbol_id):
         z, regime, vq_loss, dist, se, z_e, probs = self.encode(daily, intraday, symbol_id)
         x = torch.cat([z, se], dim=-1)
-        next_logits = self.next_regime(x)
+        if self.dynamics_head == "latent":
+            # Detached inputs: the dynamics loss trains only this head. Otherwise it also moves the encoder, which
+            # shifts the current regime (and so the target) while the head chases it.
+            # Anchor on the continuous latent: its nearest code is by definition the assigned regime, so a zero
+            # residual is exact persistence. (z_q can sit next to near-duplicate re-seeded codes and miss it.)
+            zd = F.normalize(z_e, dim=-1).detach()
+            z_next = F.normalize(zd + self.next_latent(torch.cat([zd, se.detach()], dim=-1)), dim=-1)
+            next_logits = -(2.0 - 2.0 * z_next @ self.vq.codebook().detach().t()) * self.dynamics_log_scale.exp()
+        elif self.dynamics_head == "gated":
+            # Detached inputs: the dynamics loss trains only the head, not the encoder or codebook.
+            xd = torch.cat([F.normalize(z_e, dim=-1).detach(), se.detach()], dim=-1)
+            # Exact persistence (lightly smoothed one-hot). softmax(-dist/T) is too diffuse here: neighbouring codes
+            # are often only a few hundredths apart in cosine distance, so it spreads "stay" over several regimes.
+            k = dist.size(-1)
+            p_stay = F.one_hot(regime, k).float() * (1 - 1e-2) + 1e-2 / k
+            p_move = torch.softmax(self.next_regime(xd), dim=-1)
+            g = torch.sigmoid(self.stay_gate(xd))
+            next_logits = torch.log(g * p_stay + (1 - g) * p_move + 1e-8)  # log-probs; cross_entropy accepts them as logits
+        else:
+            next_logits = self.next_regime(x)
         ret = self.return_head(x).view(-1, self.num_horizons, 2)
         mu = ret[..., 0]
         log_sigma = ret[..., 1].clamp(-6.0, 3.0)

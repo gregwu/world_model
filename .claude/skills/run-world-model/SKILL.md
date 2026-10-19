@@ -33,8 +33,23 @@ python3 -m mwm.evaluate --checkpoint artifacts/best.pt --split test
 python3 -m mwm.transitions --checkpoint artifacts/best.pt --split train --out artifacts/transitions.npz
 ```
 
+Daily-only model (intended 2015-2024 / 2025 / 2026 split, ~35-80 s per epoch):
+
+```bash
+python3 scripts/export_from_db.py --daily-only --top-liquid 200 --daily-start 2014-01-01 --out-dir data/daily200
+python3 scripts/build_dataset.py --config configs/daily.yaml
+python3 -u -m mwm.train --config configs/daily.yaml > artifacts/daily/train.log 2>&1   # stage 1 + stage-2 dynamics fine-tune
+python3 -m mwm.train --config configs/daily.yaml --dynamics-only                      # stage 2 alone on an existing checkpoint
+python3 scripts/diagnostics.py --config configs/daily.yaml --checkpoint artifacts/daily/best.pt   # GBM baseline + regime eta^2
+```
+
+Always use `python3 -u` when redirecting training output, or the epoch lines only appear at exit. When killing a
+training run, kill by PID: `pkill -f "mwm.train ..."` also matches the shell running it. Killed runs can leave
+orphaned data-loader workers (ppid 1) behind; check `ps -eo pid,ppid,cmd | grep mwm.train`.
+
 Health checks: train log lines are JSON per epoch - `val.usage_entropy` near 0 means the regime codebook collapsed;
-evaluate's `regimes_used` should be well above 1 and transitions' `nonzero_edges` well above 1.
+evaluate's `regimes_used` should be well above 1 and transitions' `nonzero_edges` well above 1. The dynamics head
+is only working if `next_regime_acc` >= `persistence_acc`.
 
 Memory: each sample is ~30 KB (455x12 intraday + 40x72 daily float32). The box has ~120 GB shared with other services;
 keep the pack under ~300k samples or raise it carefully.
