@@ -121,6 +121,42 @@ The vector quantizer now:
 
 `db_2026.yaml` raises `entropy_weight` to 0.1 now that the term has an effect.
 
+## Results: `configs/db_2026.yaml`, 20 tickers
+
+Run on 2026-10-18 on the GB10 box. 237,611 samples across 20 liquid US tickers, with 72 daily features (12 bar features plus 60 indicators) and 12 intraday features. Training early-stopped after epoch 11 of 15; the best checkpoint is from epoch 7 (validation NLL −3.48).
+
+The table compares this run with the first one, which used 6 tickers, no indicators and the old quantizer:
+
+| | First run | This run |
+|---|---|---|
+| Regimes used (test) | 1 of 64 | 62 of 64 |
+| Transition graph edges | 1 | 1,426 |
+| Training usage entropy, final epoch | ~0 | 0.87 |
+
+On the training split, 82% of 5-minute steps stay in the same regime, and the most likely next regime has 76% probability on average.
+
+Test set, 66,220 samples (Aug 16 – Oct 16 2026):
+
+| Horizon (5m bars) | 1 | 3 | 12 | 78 |
+|---|---|---|---|---|
+| Directional accuracy | 49.4% | 49.6% | 50.4% | 49.6% |
+| 90% interval coverage | 89.3% | 95.9% | 94.3% | 82.2% |
+| MAE of mean log return | 0.0028 | 0.0027 | 0.0055 | 0.0176 |
+
+The regime codebook is now healthy, but the return head has **no directional edge** at any horizon. The predictive intervals are roughly calibrated up to 12 bars and too narrow at 78 bars.
+
+### Open issue: dynamics head
+
+`dynamics_ce` stays near 3.8, close to the 4.16 of a uniform guess over 64 regimes, even though most steps keep the same regime. Likely causes:
+
+- the next-step target regime is encoded with dropout active during training, which makes it noisy;
+- dead-code restarts change what each regime id means while training runs.
+
+### Running notes
+
+- Training took 3h18m. Data loading is single-threaded (`num_workers: 0`) and epochs slowed from about 5 minutes to well over 10 as the run went on.
+- When redirecting training output to a file, run `python3 -u` or the per-epoch JSON lines only appear when the process exits.
+
 ## Evaluate frozen 2026 test
 
 ```bash
