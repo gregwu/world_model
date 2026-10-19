@@ -14,25 +14,31 @@ import argparse, json
 import numpy as np
 import yaml
 from sklearn.ensemble import HistGradientBoostingClassifier
-from mwm.data import WorldModelDataset
+from mwm.data import open_dataset
 from mwm.features import feature_columns
 
 LOG_RETURN = feature_columns().index("log_return")
 
 
-def summary_features(ds: WorldModelDataset, rows: np.ndarray) -> np.ndarray:
-    d = ds.daily[rows]
-    parts = [d[:, -1], d[:, -5:].mean(1), d.mean(1), d[:, :, LOG_RETURN].std(1, keepdims=True)]
-    if ds.intraday is not None:
-        x = ds.intraday[rows]
-        parts += [x[:, -1], x[:, -12:].mean(1), x[:, -78:].mean(1), x[:, -78:, LOG_RETURN].std(1, keepdims=True)]
-    return np.concatenate(parts, axis=1)
+def _chunked(fn, rows, chunk=20_000):
+    return np.concatenate([fn(rows[k:k + chunk]) for k in range(0, len(rows), chunk)])
 
 
-def trailing_vol(ds: WorldModelDataset, rows: np.ndarray) -> np.ndarray:
-    if ds.intraday is not None:
-        return ds.intraday[rows][:, -78:, LOG_RETURN].std(1)
-    return ds.daily[rows][:, -20:, LOG_RETURN].std(1)
+def summary_features(ds, rows: np.ndarray) -> np.ndarray:
+    def one(r):
+        d = ds.daily_windows(r)
+        parts = [d[:, -1], d[:, -5:].mean(1), d.mean(1), d[:, :, LOG_RETURN].std(1, keepdims=True)]
+        if ds.intra_dim:
+            x = ds.intraday_windows(r)
+            parts += [x[:, -1], x[:, -12:].mean(1), x[:, -78:].mean(1), x[:, -78:, LOG_RETURN].std(1, keepdims=True)]
+        return np.concatenate(parts, axis=1)
+    return _chunked(one, rows)
+
+
+def trailing_vol(ds, rows: np.ndarray) -> np.ndarray:
+    if ds.intra_dim:
+        return _chunked(lambda r: ds.intraday_windows(r)[:, -78:, LOG_RETURN].std(1), rows)
+    return _chunked(lambda r: ds.daily_windows(r)[:, -20:, LOG_RETURN].std(1), rows)
 
 
 def eta_squared(values: np.ndarray, groups: np.ndarray) -> float:
@@ -61,10 +67,12 @@ def main():
     ap.add_argument("--max-train", type=int, default=300_000)
     ap.add_argument("--splits", default="val,test")
     ap.add_argument("--skip-baseline", action="store_true")
+    ap.add_argument("--max-eval", type=int, default=None, help="fixed random subset of pairs per evaluated split")
     args = ap.parse_args()
     cfg = yaml.safe_load(open(args.config)); p = cfg["data"]["out_path"]; ranges = split_ranges(cfg)
     rng = np.random.default_rng(cfg["seed"])
-    raw = {k: WorldModelDataset(p, *ranges[k]) for k in ["train", *args.splits.split(",")]}
+    raw = {k: open_dataset(p, *ranges[k], max_samples=args.max_eval if k != "train" else None, seed=cfg["seed"])
+           for k in ["train", *args.splits.split(",")]}
     report = {"config": args.config, "baseline": {}, "regimes": {}}
 
     tr = raw["train"]; tr_rows = tr.pair_rows
@@ -89,8 +97,8 @@ def main():
         from mwm.transitions import infer_regimes
         train_vol = trailing_vol(tr, tr_rows)
         for split in args.splits.split(","):
-            ck, mcfg, ds, dev, model = load_checkpoint(args.checkpoint, split)
-            regimes = infer_regimes(model, ds, dev, mcfg["train"]["batch_size"])  # aligned with ds.pair_rows
+            ck, mcfg, ds, dev, model = load_checkpoint(args.checkpoint, split, args.max_eval)
+            regimes = infer_regimes(model, ds, dev, mcfg["train"]["batch_size"], mcfg["train"].get("amp"))  # aligned with ds.pair_rows
             rows = ds.pair_rows; Y = ds.returns[rows]
             vol_bins = quantile_bins(trailing_vol(raw[split], rows), train_vol)
             res = []

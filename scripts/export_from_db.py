@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--daily-start", default="2024-01-01")
     ap.add_argument("--out-dir", default="data")
     ap.add_argument("--daily-only", action="store_true")
+    ap.add_argument("--tickers-file", default="", help="one symbol per line; added to --tickers or --top-liquid")
     ap.add_argument("--top-liquid", type=int, default=0)
     ap.add_argument("--liquid-start", default="2014-01-01")
     ap.add_argument("--liquid-end", default="2014-12-31")
@@ -48,7 +49,9 @@ def main():
                          f"order by percentile_cont(0.5) within group (order by close*volume) desc limit {args.top_liquid}")
         tickers = top["ticker"].str.upper().tolist()
     else:
-        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] if not args.tickers_file else []
+    if args.tickers_file:
+        tickers = list(dict.fromkeys(tickers + [t.strip().upper() for t in open(args.tickers_file) if t.strip()]))
     plain = ",".join(f"'{t}'" for t in tickers)
     dotted = ",".join(f"'{t}.US'" for t in tickers)
 

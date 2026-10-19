@@ -55,6 +55,10 @@ class VectorQuantizer(nn.Module):
         return F.normalize(self.embedding.weight, dim=-1)
 
     def forward(self, z):
+        with torch.autocast(device_type=z.device.type, enabled=False):  # fp32: bf16 is too coarse for near-tied codes
+            return self._forward(z.float())
+
+    def _forward(self, z):
         z = F.normalize(z, dim=-1)
         codes = self.codebook()
         # squared Euclidean distance on the unit sphere = 2 - 2*cos
@@ -162,8 +166,8 @@ class MarketWorldModel(nn.Module):
             # are often only a few hundredths apart in cosine distance, so it spreads "stay" over several regimes.
             k = dist.size(-1)
             p_stay = F.one_hot(regime, k).float() * (1 - 1e-2) + 1e-2 / k
-            p_move = torch.softmax(self.next_regime(xd), dim=-1)
-            g = torch.sigmoid(self.stay_gate(xd))
+            p_move = torch.softmax(self.next_regime(xd).float(), dim=-1)
+            g = torch.sigmoid(self.stay_gate(xd).float())
             next_logits = torch.log(g * p_stay + (1 - g) * p_move + 1e-8)  # log-probs; cross_entropy accepts them as logits
         else:
             next_logits = self.next_regime(x)

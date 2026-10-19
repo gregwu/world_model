@@ -1,0 +1,111 @@
+# 5m world model on Alpaca SIP history (scripts/download_alpaca_5m.py): S&P 500 constituents + the 100 most
+# liquid tickers of 2014, regular session, 2016-01-04 .. 2026-10-16. Daily context from ohlcv_daily/indicators_daily
+# (scripts/export_from_db.py --daily-only --tickers-file data/alpaca5m/universe.txt --out-dir data/alpaca5m).
+# Lazy pack: ~100M samples would need hundreds of GB as materialized windows; see mwm/lazy.py.
+seed: 42
+
+data:
+  format: lazy
+  daily_path: data/alpaca5m/daily.parquet
+  intraday_path: data/alpaca5m/bars        # directory: one Parquet file per symbol
+  daily_indicators_path: data/alpaca5m/indicators_daily.parquet
+  # Same 48 causal indicators as configs/daily.yaml.
+  daily_indicator_columns:
+    - rsi_14
+    - adx_14
+    - stoch_k
+    - stoch_d
+    - macd_zscore
+    - macd_signal_zscore
+    - macd_hist_zscore
+    - macd_slope_5d
+    - macd_signal_slope_5d
+    - price_to_ema_20_pct
+    - price_to_ema_50_pct
+    - price_to_ema_200_pct
+    - price_to_sma5_pct
+    - sma_5_slope_pct
+    - sma_20_slope_pct
+    - sma_50_slope_pct
+    - sma5_slope_5d
+    - price_momentum_slope_5d
+    - pct_off_high_14d
+    - pct_off_low_14d
+    - atr_to_price_ratio
+    - volatility_20
+    - price_volatility
+    - bb_std_pct
+    - vri_10
+    - vri_20
+    - volume_ratio
+    - volume_momentum
+    - volume_ratio_lag_5
+    - obv_roc_20
+    - cmf_10
+    - cmf_20
+    - price_to_vwap_pct
+    - d_pctb
+    - chg_1d
+    - chg_3d
+    - chg_5d
+    - chg_10d
+    - chg_21d
+    - run_len
+    - d_pctb_chg1
+    - d_pctb_chg5
+    - off_hi10
+    - off_lo10
+    - off_hi20
+    - off_lo20
+    - since_up
+    - rsi_7
+  out_path: data/alpaca5m/pack             # lazy pack directory
+  daily_lookback: 40
+  intraday_lookback: 455
+  horizons_5m: [1, 3, 12, 78]
+  min_price: 1.0
+
+split:
+  train_start: "2016-01-01"
+  train_end: "2024-12-31"
+  val_start: "2025-01-01"
+  val_end: "2025-12-31"
+  test_start: "2026-01-01"
+  test_end: "2026-12-31"
+
+model:
+  d_model: 128
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 256
+  dropout: 0.10
+  latent_dim: 64
+  num_regimes: 64
+  vq_temperature: 0.1
+  vq_dead_threshold: 0.001
+  stock_embedding_dim: 32
+  dynamics_hidden: 128
+  dynamics_head: gated  # p(next) = g*p(stay) + (1-g)*p(move); see model.py
+  return_hidden: 128
+
+train:
+  batch_size: 512
+  epochs: 20
+  samples_per_epoch: 1000000   # fresh random subset of training pairs each epoch
+  val_max_samples: 200000      # fixed random subset of 2025 pairs
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  patience: 4
+  vq_restart_epochs: 30  # every epoch: the gated dynamics head tolerates code re-seeding
+  dynamics_finetune_epochs: 3  # stage 2: fit only the dynamics head on the frozen best checkpoint
+  amp: bf16
+  device: auto
+  num_workers: 4
+  checkpoint: artifacts/alpaca5m/best.pt
+
+loss:
+  return_weight: 1.0
+  dynamics_weight: 0.5
+  vq_weight: 0.25
+  entropy_weight: 0.1

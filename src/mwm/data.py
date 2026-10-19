@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 from .features import add_bar_features, feature_columns
 
 NORM_CLIP = 10.0  # normalized features are clipped to +-NORM_CLIP standard deviations
@@ -206,8 +206,24 @@ def _normalize(x, mean, std):
     return np.clip((x - mean) / std, -NORM_CLIP, NORM_CLIP).astype(np.float32)
 
 
+def pair_next(symbol_id: np.ndarray, bar_index: np.ndarray | None, timestamps_ns: np.ndarray):
+    """Pair each sample with the immediately following sample (next bar) of the same symbol.
+    Returns (next_idx, pair_rows); next_idx is -1 where there is no next sample. Samples must be sorted by symbol, time."""
+    next_idx = np.full(len(symbol_id), -1, dtype=np.int64)
+    if len(symbol_id) > 1:
+        same = symbol_id[:-1] == symbol_id[1:]
+        if bar_index is not None:
+            adjacent = bar_index[1:] - bar_index[:-1] == 1
+        else:  # packs built before bar_index existed: 5-minute samples only
+            adjacent = timestamps_ns[1:] - timestamps_ns[:-1] == 5 * 60 * 1_000_000_000
+        valid = same & adjacent
+        next_idx[:-1][valid] = np.arange(1, len(symbol_id))[valid]
+    return next_idx, np.flatnonzero(next_idx >= 0)
+
+
 class WorldModelDataset(Dataset):
-    def __init__(self, npz_path: str, start: str, end: str, stats: dict | None = None):
+    def __init__(self, npz_path: str, start: str, end: str, stats: dict | None = None,
+                 max_samples: int | None = None, seed: int = 0):
         start, end = str(start), str(end)  # YAML parses unquoted dates as datetime.date
         z = np.load(npz_path, allow_pickle=True)
         ts = pd.to_datetime(z["timestamps_ns"], utc=True)
@@ -225,19 +241,17 @@ class WorldModelDataset(Dataset):
             self.daily = _normalize(self.daily, stats["daily_mean"], stats["daily_std"])
             if self.intraday is not None:
                 self.intraday = _normalize(self.intraday, stats["intra_mean"], stats["intra_std"])
+        self.daily_dim = self.daily.shape[-1]
+        self.intra_dim = self.intraday.shape[-1] if self.intraday is not None else 0
 
-        # Pair each sample with the immediately following sample (next bar) of the same symbol.
-        # This keeps chronology intact even when DataLoader shuffles dataset items.
-        self.next_idx = np.full(len(self.symbol_id), -1, dtype=np.int64)
-        if len(self.symbol_id) > 1:
-            same = self.symbol_id[:-1] == self.symbol_id[1:]
-            if bar_index is not None:
-                adjacent = bar_index[1:] - bar_index[:-1] == 1
-            else:  # packs built before bar_index existed: 5-minute samples only
-                adjacent = self.timestamps_ns[1:] - self.timestamps_ns[:-1] == 5 * 60 * 1_000_000_000
-            valid = same & adjacent
-            self.next_idx[:-1][valid] = np.arange(1, len(self.symbol_id))[valid]
-        self.pair_rows = np.flatnonzero(self.next_idx >= 0)
+        # Pairing keeps chronology intact even when DataLoader shuffles dataset items.
+        self.next_idx, self.pair_rows = pair_next(self.symbol_id, bar_index, self.timestamps_ns)
+        if max_samples and len(self.pair_rows) > max_samples:
+            rng = np.random.default_rng(seed)
+            self.pair_rows = np.sort(rng.choice(self.pair_rows, max_samples, replace=False))
+
+    def daily_windows(self, samples): return self.daily[samples]
+    def intraday_windows(self, samples): return self.intraday[samples]
 
     def __len__(self): return len(self.pair_rows)
 
@@ -264,13 +278,26 @@ def _batch_passthrough(batch):
     return batch  # __getitems__ already returns a collated batch
 
 
-def make_loader(ds: WorldModelDataset, batch_size: int, shuffle: bool, num_workers: int = 0) -> DataLoader:
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+def make_loader(ds, batch_size: int, shuffle: bool, num_workers: int = 0, num_samples: int | None = None) -> DataLoader:
+    """num_samples (with shuffle) draws a fresh random subset of that many pairs each epoch."""
+    sampler = None
+    if shuffle and num_samples and num_samples < len(ds):
+        sampler = RandomSampler(ds, replacement=False, num_samples=num_samples); shuffle = False
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers,
                       collate_fn=_batch_passthrough, pin_memory=torch.cuda.is_available(),
                       persistent_workers=num_workers > 0)
 
 
-def fit_stats(ds: WorldModelDataset) -> dict:
+def open_dataset(path: str, start: str, end: str, stats: dict | None = None, max_samples: int | None = None, seed: int = 0):
+    """Lazy pack directory or in-memory .npz pack, by path."""
+    from .lazy import LazyWorldModelDataset, is_lazy_pack
+    cls = LazyWorldModelDataset if is_lazy_pack(path) else WorldModelDataset
+    return cls(path, start, end, stats, max_samples, seed)
+
+
+def fit_stats(ds) -> dict:
+    if hasattr(ds, "fit_stats"):
+        return ds.fit_stats()
     dmean = ds.daily.mean(axis=(0, 1), keepdims=True)
     dstd = ds.daily.std(axis=(0, 1), keepdims=True) + 1e-6
     stats = {"daily_mean": dmean, "daily_std": dstd}

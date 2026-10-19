@@ -4,7 +4,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
-from .data import WorldModelDataset, fit_stats, make_loader
+import contextlib
+from .data import fit_stats, make_loader, open_dataset
 from .model import MarketWorldModel
 from .losses import gaussian_nll, code_usage_entropy, soft_code_usage_entropy
 
@@ -22,9 +23,15 @@ def device_from(cfg):
     return torch.device("cpu")
 
 
-def build_model(ds: WorldModelDataset, num_symbols: int, model_cfg: dict) -> MarketWorldModel:
-    intra_dim = ds.intraday.shape[-1] if ds.intraday is not None else 0
-    return MarketWorldModel(ds.daily.shape[-1], intra_dim, num_symbols, ds.returns.shape[-1], model_cfg)
+def build_model(ds, num_symbols: int, model_cfg: dict) -> MarketWorldModel:
+    return MarketWorldModel(ds.daily_dim, ds.intra_dim, num_symbols, ds.returns.shape[-1], model_cfg)
+
+
+def autocast_for(device, amp: str | None):
+    """bf16 autocast on CUDA when amp == "bf16"; the vector quantizer opts out and stays fp32."""
+    if amp == "bf16" and device.type == "cuda":
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
 
 
 def to_device(b, device):
@@ -32,11 +39,12 @@ def to_device(b, device):
 
 
 @torch.no_grad()
-def encode_next_regime(model, b):
+def encode_next_regime(model, b, amp=None):
     """Regime of the actual next observation, encoded in eval mode so dropout doesn't make the target noisy."""
     was_training = model.training
     model.eval()
-    regime = model.encode(b["next_daily"], b.get("next_intraday"), b["symbol_id"])[1]
+    with autocast_for(b["daily"].device, amp):
+        regime = model.encode(b["next_daily"], b.get("next_intraday"), b["symbol_id"])[1]
     model.train(was_training)
     return regime
 
@@ -45,18 +53,18 @@ METRICS = ("loss", "nll", "vq", "entropy", "usage_entropy", "dynamics_ce", "next
 
 
 def run_epoch(model, loader, opt, device, loss_cfg, num_regimes, train=True, allow_restarts=False, grad_clip=1.0,
-              module_train_mode=None):
+              module_train_mode=None, amp=None):
     model.train(train if module_train_mode is None else module_train_mode)
     totals = torch.zeros(len(METRICS), device=device); restarts = torch.zeros((), device=device); n = 0
     for b in loader:
         b = to_device(b, device); y = b["future_returns"]
         # The next-state target is encoded from the actual next observation, but detached.
         # This is self-supervised dynamics learning, not a label from the future-return head.
-        next_regime = encode_next_regime(model, b)
-        with torch.set_grad_enabled(train):
+        next_regime = encode_next_regime(model, b, amp)
+        with torch.set_grad_enabled(train), autocast_for(device, amp):
             out = model(b["daily"], b.get("intraday"), b["symbol_id"])
-            nll = gaussian_nll(y, out["return_mu"], out["return_log_sigma"])
-            dyn = torch.nn.functional.cross_entropy(out["next_regime_logits"], next_regime)
+            nll = gaussian_nll(y, out["return_mu"].float(), out["return_log_sigma"].float())
+            dyn = torch.nn.functional.cross_entropy(out["next_regime_logits"].float(), next_regime)
             entropy = soft_code_usage_entropy(out["regime_probs"])
             loss = (loss_cfg["return_weight"]*nll + loss_cfg["dynamics_weight"]*dyn
                     + loss_cfg["vq_weight"]*out["vq_loss"] - loss_cfg["entropy_weight"]*entropy)
@@ -96,8 +104,8 @@ def finetune_dynamics(model, ck, tr, va, dev, cfg):
         t0 = time.time()
         # module_train_mode=False: frozen backbone runs without dropout, matching how targets and eval are encoded
         tm = run_epoch(model, tr, opt, dev, DYNAMICS_ONLY_LOSS, cfg["model"]["num_regimes"], True, False,
-                       tc.get("grad_clip", 1.0), module_train_mode=False)
-        vm = run_epoch(model, va, None, dev, DYNAMICS_ONLY_LOSS, cfg["model"]["num_regimes"], False)
+                       tc.get("grad_clip", 1.0), module_train_mode=False, amp=tc.get("amp"))
+        vm = run_epoch(model, va, None, dev, DYNAMICS_ONLY_LOSS, cfg["model"]["num_regimes"], False, amp=tc.get("amp"))
         print(json.dumps({"epoch": f"dyn{epoch}", "seconds": round(time.time() - t0, 1), "train": tm, "val": vm}), flush=True)
         if vm["dynamics_ce"] < best:
             best = vm["dynamics_ce"]; data["model"] = model.state_dict(); data["dynamics_finetune_epoch"] = epoch
@@ -110,27 +118,32 @@ def main():
     ap.add_argument("--dynamics-only",action="store_true",help="skip stage 1; fine-tune the dynamics head of the existing checkpoint")
     args=ap.parse_args()
     cfg=yaml.safe_load(open(args.config)); seed_all(cfg["seed"]); dev=device_from(cfg); tc=cfg["train"]
-    p=cfg["data"]["out_path"]; s=cfg["split"]
-    raw_train=WorldModelDataset(p,s["train_start"],s["train_end"]); stats=fit_stats(raw_train); del raw_train
-    train=WorldModelDataset(p,s["train_start"],s["train_end"],stats); val=WorldModelDataset(p,s["val_start"],s["val_end"],stats)
-    print(json.dumps({"train_pairs":len(train),"val_pairs":len(val),"device":str(dev)}), flush=True)
-    model=build_model(train,len(train.symbols),cfg["model"]).to(dev)
-    opt=torch.optim.AdamW(model.parameters(),lr=tc["lr"],weight_decay=tc["weight_decay"])
-    tr=make_loader(train,tc["batch_size"],True,tc["num_workers"])
-    va=make_loader(val,tc["batch_size"],False,tc["num_workers"])
-    restart_epochs=tc.get("vq_restart_epochs",3)
-    best=float("inf"); bad=0; ck=Path(tc["checkpoint"]); ck.parent.mkdir(parents=True,exist_ok=True)
+    p=cfg["data"]["out_path"]; s=cfg["split"]; amp=tc.get("amp")
+    ck=Path(tc["checkpoint"]); ck.parent.mkdir(parents=True,exist_ok=True)
     if args.dynamics_only:
         stats=torch.load(ck,map_location="cpu",weights_only=False)["stats"]  # must match the checkpoint's normalization
-        train=WorldModelDataset(p,s["train_start"],s["train_end"],stats); val=WorldModelDataset(p,s["val_start"],s["val_end"],stats)
-        tr=make_loader(train,tc["batch_size"],True,tc["num_workers"]); va=make_loader(val,tc["batch_size"],False,tc["num_workers"])
+    else:
+        stats=fit_stats(open_dataset(p,s["train_start"],s["train_end"]))
+    train=open_dataset(p,s["train_start"],s["train_end"],stats)
+    # Large packs: validate on a fixed random subset; train on a fresh random subset each epoch.
+    val=open_dataset(p,s["val_start"],s["val_end"],stats,max_samples=tc.get("val_max_samples"),seed=cfg["seed"])
+    per_epoch=tc.get("samples_per_epoch")
+    print(json.dumps({"train_pairs":len(train),"val_pairs":len(val),"samples_per_epoch":per_epoch or len(train),
+                      "device":str(dev),"amp":amp}), flush=True)
+    model=build_model(train,len(train.symbols),cfg["model"]).to(dev)
+    opt=torch.optim.AdamW(model.parameters(),lr=tc["lr"],weight_decay=tc["weight_decay"])
+    tr=make_loader(train,tc["batch_size"],True,tc["num_workers"],per_epoch)
+    va=make_loader(val,tc["batch_size"],False,tc["num_workers"])
+    restart_epochs=tc.get("vq_restart_epochs",3)
+    best=float("inf"); bad=0
+    if args.dynamics_only:
         finetune_dynamics(model,ck,tr,va,dev,{**cfg,"train":{**tc,"dynamics_finetune_epochs":tc.get("dynamics_finetune_epochs",5)}})
         return
     for epoch in range(1,tc["epochs"]+1):
         t0=time.time()
-        # Dead-code restarts only during warm-up; afterwards regime ids keep a stable meaning for the dynamics head.
-        tm=run_epoch(model,tr,opt,dev,cfg["loss"],cfg["model"]["num_regimes"],True,epoch<=restart_epochs,tc.get("grad_clip",1.0))
-        vm=run_epoch(model,va,None,dev,cfg["loss"],cfg["model"]["num_regimes"],False)
+        # Dead-code restarts for the first vq_restart_epochs epochs (the shipped configs: every epoch).
+        tm=run_epoch(model,tr,opt,dev,cfg["loss"],cfg["model"]["num_regimes"],True,epoch<=restart_epochs,tc.get("grad_clip",1.0),amp=amp)
+        vm=run_epoch(model,va,None,dev,cfg["loss"],cfg["model"]["num_regimes"],False,amp=amp)
         print(json.dumps({"epoch":epoch,"seconds":round(time.time()-t0,1),"train":tm,"val":vm}), flush=True)
         if vm["nll"]<best:
             best=vm["nll"]; bad=0
