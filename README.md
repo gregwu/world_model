@@ -261,6 +261,31 @@ So as a volatility forecaster the model adds little over the lookup table. Givin
 - **Direction:** none. The predicted mean return is uncorrelated with the realized return at every horizon (|corr| ≤ 0.005). Regimes explain at most 0.1% of signed-return variance, including at 78 bars, where the 20-ticker `db_2026` model had shown 2.4%; that now looks like noise from its small universe. Last-bar momentum scores 49-50%, with a faint short-term reversal (corr about −0.006).
 - **Calibration:** intervals are too wide at 1 bar (96-97% coverage for a 90% band) and about right from 12 bars on.
 
+### Intraday volatility profile
+
+This is the time-of-day pattern behind the correction above. Medians over 12M randomly sampled regular-session 5m bars from the Alpaca pack (529 tickers, 2016-2026). "Range" is (high − low) / previous close.
+
+| Time (ET) | Median 5m bar range | Range vs midday (12:00-14:00) | Volume vs midday |
+|---|---|---|---|
+| 09:30 (first bar) | 0.68% | **5.3×** | 4.1× |
+| 09:35 | 0.45% | 3.5× | 1.9× |
+| 10:00 | 0.30% | 2.4× | 1.9× |
+| 10:30 | 0.22% | 1.8× | 1.5× |
+| 11:30 | 0.17% | 1.3× | 1.3× |
+| 12:30-13:30 | 0.13% | **1.0×** (the low) | 1.0× |
+| 14:00 | 0.14% | 1.1× | 1.2× |
+| 15:00 | 0.14% | 1.1× | 1.4× |
+| 15:45 | 0.17% | 1.3× | 3.5× |
+| 15:50 | 0.20% | 1.6× | 5.5× |
+| 15:55 (last bar) | 0.23% | 1.8× | **12.5×** |
+
+- **The open is by far the most volatile period.** The first bar moves about 5× more than a midday bar; including the overnight gap, its median |return| is 0.50%. Volatility halves within 30 minutes and keeps decaying until about 12:30.
+- **Midday (12:30-13:30) is the quiet trough**, about a fifth of the open's activity.
+- **There is a small bump at 14:00**, probably from FOMC days (announcements at 14:00 ET, about 8 times a year).
+- **The close picks up**, but only to 1.6-1.8× midday on price moves. Volume rises far more, to 12.5× midday in the last bar, as orders pile into the closing auction.
+
+So price volatility is a reverse J (high open, low midday, modest rise into the close), while volume is a strong U. This shape is why time of day alone explains 24% of next-bar |return| variance on the 2026 test set, more than the model's 64 regimes do. Regenerate it with `PYTHONPATH=src python scripts/intraday_profile.py --pack data/alpaca5m/pack` (add `--csv` for all 78 slots).
+
 ### Daily model: `configs/daily.yaml`, 200 tickers
 
 Run on 2026-10-19. 592,234 samples across the 200 most liquid tickers of 2014, with 60 daily features (12 bar features plus 48 indicators). Train 2015-2024 (473k pairs), validation 2025 (49.8k), test 2026 (35.6k, evaluated once per model).
