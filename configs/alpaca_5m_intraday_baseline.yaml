@@ -1,0 +1,62 @@
+# Single-scale intraday baseline (v0.1 MarketWorldModel with no daily encoder): only 5-minute data (12 bar features + 5m/1h %B, RSI, MACD hist, 5m session-VWAP distance),
+# no daily context. Same Alpaca SIP universe and bars as configs/alpaca_5m.yaml.
+# Protocol: train 2016-2024, tune/select on 2025, 2026 FROZEN for one final out-of-sample test
+# (evaluate/transitions/diagnostics refuse --split test unless --final-test is passed).
+seed: 42
+
+data:
+  format: lazy
+  intraday_path: data/alpaca5m/bars        # directory: one Parquet file per symbol
+  # Appends 7 intraday features: 5m %B, RSI(14), MACD hist, session-VWAP distance; 1h %B, RSI, MACD hist
+  # (last completed 1h bar only). See features.add_intraday_indicators.
+  intraday_indicators: true
+  out_path: data/alpaca5m/pack_pure        # lazy pack directory, no daily arrays
+  intraday_lookback: 455
+  horizons_5m: [1, 3, 12, 78]
+  min_price: 1.0
+
+split:
+  train_start: "2016-01-01"
+  train_end: "2024-12-31"
+  val_start: "2025-01-01"
+  val_end: "2025-12-31"
+  test_start: "2026-01-01"
+  test_end: "2026-12-31"
+  test_frozen: true   # final out-of-sample year: no tuning, no peeking
+
+model:
+  d_model: 128
+  nhead: 4
+  num_layers: 3
+  dim_feedforward: 256
+  dropout: 0.10
+  latent_dim: 64
+  num_regimes: 64
+  vq_temperature: 0.1
+  vq_dead_threshold: 0.001
+  stock_embedding_dim: 32
+  dynamics_hidden: 128
+  dynamics_head: gated  # p(next) = g*p(stay) + (1-g)*p(move); see model.py
+  return_hidden: 128
+
+train:
+  batch_size: 512
+  epochs: 30          # the daily+5m run was still improving at 20
+  samples_per_epoch: 1000000   # fresh random subset of training pairs each epoch
+  val_max_samples: 200000      # fixed random subset of 2025 pairs
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  patience: 4
+  vq_restart_epochs: 30  # every epoch: the gated dynamics head tolerates code re-seeding
+  dynamics_finetune_epochs: 3  # stage 2: fit only the dynamics head on the frozen best checkpoint
+  amp: bf16
+  device: auto
+  num_workers: 4
+  checkpoint: artifacts/alpaca5m_intraday_baseline/best.pt
+
+loss:
+  return_weight: 1.0
+  dynamics_weight: 0.5
+  vq_weight: 0.25
+  entropy_weight: 0.1

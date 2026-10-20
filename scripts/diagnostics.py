@@ -29,8 +29,10 @@ def _chunked(fn, rows, chunk=20_000):
 
 def summary_features(ds, rows: np.ndarray) -> np.ndarray:
     def one(r):
-        d = ds.daily_windows(r)
-        parts = [d[:, -1], d[:, -5:].mean(1), d.mean(1), d[:, :, LOG_RETURN].std(1, keepdims=True)]
+        parts = []
+        if ds.daily_dim:
+            d = ds.daily_windows(r)
+            parts += [d[:, -1], d[:, -5:].mean(1), d.mean(1), d[:, :, LOG_RETURN].std(1, keepdims=True)]
         if ds.intra_dim:
             x = ds.intraday_windows(r)
             parts += [x[:, -1], x[:, -12:].mean(1), x[:, -78:].mean(1), x[:, -78:, LOG_RETURN].std(1, keepdims=True)]
@@ -77,8 +79,12 @@ def main():
     ap.add_argument("--splits", default="val,test")
     ap.add_argument("--skip-baseline", action="store_true")
     ap.add_argument("--max-eval", type=int, default=None, help="fixed random subset of pairs per evaluated split")
+    ap.add_argument("--final-test", action="store_true", help="allow the test split when the config sets split.test_frozen")
     args = ap.parse_args()
     cfg = yaml.safe_load(open(args.config)); p = cfg["data"]["out_path"]; ranges = split_ranges(cfg)
+    from mwm.evaluate import check_test_access
+    for split in args.splits.split(","):
+        check_test_access(cfg, split, args.final_test)
     rng = np.random.default_rng(cfg["seed"])
     raw = {k: open_dataset(p, *ranges[k], max_samples=args.max_eval if k != "train" else None, seed=cfg["seed"])
            for k in ["train", *args.splits.split(",")]}
@@ -106,7 +112,7 @@ def main():
         from mwm.transitions import infer_regimes
         train_vol = trailing_vol(tr, tr_rows)
         for split in args.splits.split(","):
-            ck, mcfg, ds, dev, model = load_checkpoint(args.checkpoint, split, args.max_eval)
+            ck, mcfg, ds, dev, model = load_checkpoint(args.checkpoint, split, args.max_eval, args.final_test)
             regimes = infer_regimes(model, ds, dev, mcfg["train"]["batch_size"], mcfg["train"].get("amp"))  # aligned with ds.pair_rows
             rows = ds.pair_rows; Y = ds.returns[rows]
             vol = trailing_vol(raw[split], rows); vol_bins = quantile_bins(vol, train_vol)

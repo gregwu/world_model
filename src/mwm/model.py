@@ -93,12 +93,15 @@ class MarketWorldModel(nn.Module):
     def __init__(self, daily_dim: int, intra_dim: int, num_symbols: int, num_horizons: int, cfg: dict):
         super().__init__()
         d = cfg["d_model"]
-        self.daily_enc = SequenceEncoder(daily_dim, d, cfg["nhead"], cfg["num_layers"], cfg["dim_feedforward"], cfg["dropout"])
-        # intra_dim == 0 builds a daily-only model
+        if daily_dim <= 0 and intra_dim <= 0:
+            raise ValueError("need daily and/or intraday inputs")
+        # daily_dim == 0 builds a pure-intraday model; intra_dim == 0 a daily-only one
+        self.daily_enc = (SequenceEncoder(daily_dim, d, cfg["nhead"], cfg["num_layers"], cfg["dim_feedforward"], cfg["dropout"])
+                          if daily_dim > 0 else None)
         self.intra_enc = (SequenceEncoder(intra_dim, d, cfg["nhead"], cfg["num_layers"], cfg["dim_feedforward"], cfg["dropout"])
                           if intra_dim > 0 else None)
         self.stock_emb = nn.Embedding(num_symbols, cfg["stock_embedding_dim"])
-        fusion_in = d * (2 if self.intra_enc is not None else 1) + cfg["stock_embedding_dim"]
+        fusion_in = d * ((self.daily_enc is not None) + (self.intra_enc is not None)) + cfg["stock_embedding_dim"]
         self.to_latent = nn.Sequential(
             nn.Linear(fusion_in, cfg["dynamics_hidden"]), nn.GELU(), nn.LayerNorm(cfg["dynamics_hidden"]),
             nn.Linear(cfg["dynamics_hidden"], cfg["latent_dim"]),
@@ -140,7 +143,9 @@ class MarketWorldModel(nn.Module):
         self.num_horizons = num_horizons
 
     def encode(self, daily, intraday, symbol_id):
-        parts = [self.daily_enc(daily)]
+        parts = []
+        if self.daily_enc is not None:
+            parts.append(self.daily_enc(daily))
         if self.intra_enc is not None:
             parts.append(self.intra_enc(intraday))
         se = self.stock_emb(symbol_id)

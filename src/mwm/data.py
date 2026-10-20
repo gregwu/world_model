@@ -288,6 +288,44 @@ def make_loader(ds, batch_size: int, shuffle: bool, num_workers: int = 0, num_sa
                       persistent_workers=num_workers > 0)
 
 
+class CrossSectionalBatchSampler:
+    """Batches of `timestamps` random timestamps x up to batch_size/timestamps random symbols each.
+
+    Random batches from ~100M pairs almost never contain two symbols at the same timestamp, so a loss on
+    cross-sectionally demeaned returns would see no cross-section at all. fixed=True draws the same batches every
+    epoch (for validation).
+    """
+
+    def __init__(self, ds, batch_size: int, timestamps: int, num_batches: int, seed: int = 0, fixed: bool = False):
+        ts = ds.timestamps_ns[ds.pair_rows]
+        order = np.argsort(ts, kind="stable")
+        self.rows = order  # positions into ds.pair_rows, grouped by timestamp
+        cuts = np.r_[0, np.flatnonzero(np.diff(ts[order])) + 1, len(order)]
+        starts, counts = cuts[:-1], np.diff(cuts)
+        keep = counts >= 2
+        self.starts, self.counts = starts[keep], counts[keep]
+        self.timestamps, self.per_ts = timestamps, max(2, batch_size // timestamps)
+        self.num_batches, self.seed, self.fixed, self.epoch = num_batches, seed, fixed, 0
+
+    def __len__(self): return self.num_batches
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed if self.fixed else self.seed + 1000 + self.epoch)
+        self.epoch += 1
+        for _ in range(self.num_batches):
+            groups = rng.choice(len(self.starts), self.timestamps, replace=False)
+            batch = [self.rows[self.starts[g] + rng.choice(self.counts[g], min(self.per_ts, self.counts[g]), replace=False)]
+                     for g in groups]
+            yield np.concatenate(batch).tolist()
+
+
+def make_cross_sectional_loader(ds, batch_size: int, timestamps: int, num_samples: int, num_workers: int = 0,
+                                seed: int = 0, fixed: bool = False) -> DataLoader:
+    sampler = CrossSectionalBatchSampler(ds, batch_size, timestamps, max(1, num_samples // batch_size), seed, fixed)
+    return DataLoader(ds, batch_sampler=sampler, num_workers=num_workers, collate_fn=_batch_passthrough,
+                      pin_memory=torch.cuda.is_available(), persistent_workers=num_workers > 0)
+
+
 def open_dataset(path: str, start: str, end: str, stats: dict | None = None, max_samples: int | None = None, seed: int = 0):
     """Lazy pack directory or in-memory .npz pack, by path."""
     from .lazy import LazyWorldModelDataset, is_lazy_pack

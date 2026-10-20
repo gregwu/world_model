@@ -47,6 +47,8 @@ class IntradayWorldModel(nn.Module):
     and used for probabilistic multi-horizon returns, market-neutral residual returns, and next-state dynamics.
     No daily features are consumed.
     """
+    pure_intraday = True  # called as model(intraday, symbol_id); see train.run_model
+
     def __init__(self, intra_dim: int, num_symbols: int, num_horizons: int, cfg: dict):
         super().__init__()
         d = cfg.get("d_model", 128)
@@ -69,9 +71,19 @@ class IntradayWorldModel(nn.Module):
         head_in = latent_dim + emb_dim
         self.return_head = nn.Sequential(nn.Linear(head_in, cfg.get("return_hidden", 128)), nn.GELU(), nn.Linear(cfg.get("return_hidden", 128), num_horizons*2))
         self.relative_head = nn.Sequential(nn.Linear(head_in, cfg.get("return_hidden", 128)), nn.GELU(), nn.Linear(cfg.get("return_hidden", 128), num_horizons))
-        self.next_latent = nn.Sequential(nn.Linear(head_in, hidden), nn.GELU(), nn.Linear(hidden, latent_dim))
-        nn.init.zeros_(self.next_latent[-1].weight); nn.init.zeros_(self.next_latent[-1].bias)
-        self.dynamics_log_scale = nn.Parameter(torch.tensor(math.log(1.0/cfg.get("vq_temperature", 0.1))))
+        # dynamics_head: "latent" (next latent = z + residual, scored against the codebook) or "gated"
+        # (p = g * onehot(current regime) + (1 - g) * softmax(move logits); see model.py and the README's
+        # "Dynamics head" section: the latent head drifted below the persistence baseline in v0.1 runs).
+        self.dynamics_head = cfg.get("dynamics_head", "latent")
+        if self.dynamics_head == "gated":
+            k = cfg.get("num_regimes", 64)
+            self.next_regime = nn.Sequential(nn.Linear(head_in, hidden), nn.GELU(), nn.Linear(hidden, k))
+            self.stay_gate = nn.Sequential(nn.Linear(head_in, hidden), nn.GELU(), nn.Linear(hidden, 1))
+            nn.init.zeros_(self.stay_gate[-1].weight); nn.init.constant_(self.stay_gate[-1].bias, 3.0)
+        else:
+            self.next_latent = nn.Sequential(nn.Linear(head_in, hidden), nn.GELU(), nn.Linear(hidden, latent_dim))
+            nn.init.zeros_(self.next_latent[-1].weight); nn.init.zeros_(self.next_latent[-1].bias)
+            self.dynamics_log_scale = nn.Parameter(torch.tensor(math.log(1.0/cfg.get("vq_temperature", 0.1))))
         self.num_horizons = num_horizons
 
     def encode(self, intraday, symbol_id):
@@ -93,8 +105,16 @@ class IntradayWorldModel(nn.Module):
             raw = self.return_head(x.float()).view(-1, self.num_horizons, 2)
             relative_mu = self.relative_head(x.float())
         zd = F.normalize(z_e, dim=-1).detach()
-        z_next = F.normalize(zd + self.next_latent(torch.cat([zd, se.detach()], -1)), dim=-1)
-        next_logits = -(2.0 - 2.0*z_next @ self.vq.codebook().detach().t()) * self.dynamics_log_scale.exp()
+        xd = torch.cat([zd, se.detach()], -1)  # detached: the dynamics loss trains only the dynamics head
+        if self.dynamics_head == "gated":
+            k = dist.size(-1)
+            p_stay = F.one_hot(regime, k).float() * (1 - 1e-2) + 1e-2 / k
+            p_move = torch.softmax(self.next_regime(xd).float(), dim=-1)
+            g = torch.sigmoid(self.stay_gate(xd).float())
+            next_logits = torch.log(g * p_stay + (1 - g) * p_move + 1e-8)
+        else:
+            z_next = F.normalize(zd + self.next_latent(xd), dim=-1)
+            next_logits = -(2.0 - 2.0*z_next @ self.vq.codebook().detach().t()) * self.dynamics_log_scale.exp()
         return {
             "z": z, "z_e": z_e, "regime": regime, "vq_loss": vq_loss,
             "regime_dist": dist, "regime_probs": probs,

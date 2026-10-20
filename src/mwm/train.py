@@ -38,13 +38,29 @@ def to_device(b, device):
     return {k: v.to(device, non_blocking=True) for k, v in b.items()}
 
 
+def run_model(model, b, nxt=False):
+    """Forward a batch through either model family: v0.1 MarketWorldModel(daily, intraday, symbol) or the pure-5m
+    IntradayWorldModel(intraday, symbol). nxt=True uses the batch's next-bar windows."""
+    p = "next_" if nxt else ""
+    if getattr(model, "pure_intraday", False):
+        return model(b[p + "intraday"], b["symbol_id"])
+    return model(b.get(p + "daily"), b.get(p + "intraday"), b["symbol_id"])
+
+
+def encode_regime(model, b, nxt=False):
+    p = "next_" if nxt else ""
+    if getattr(model, "pure_intraday", False):
+        return model.encode(b[p + "intraday"], b["symbol_id"])[1]
+    return model.encode(b.get(p + "daily"), b.get(p + "intraday"), b["symbol_id"])[1]
+
+
 @torch.no_grad()
 def encode_next_regime(model, b, amp=None):
     """Regime of the actual next observation, encoded in eval mode so dropout doesn't make the target noisy."""
     was_training = model.training
     model.eval()
-    with autocast_for(b["daily"].device, amp):
-        regime = model.encode(b["next_daily"], b.get("next_intraday"), b["symbol_id"])[1]
+    with autocast_for(b["symbol_id"].device, amp):
+        regime = encode_regime(model, b, nxt=True)
     model.train(was_training)
     return regime
 
@@ -62,7 +78,7 @@ def run_epoch(model, loader, opt, device, loss_cfg, num_regimes, train=True, all
         # This is self-supervised dynamics learning, not a label from the future-return head.
         next_regime = encode_next_regime(model, b, amp)
         with torch.set_grad_enabled(train), autocast_for(device, amp):
-            out = model(b["daily"], b.get("intraday"), b["symbol_id"])
+            out = run_model(model, b)
             nll = gaussian_nll(y, out["return_mu"].float(), out["return_log_sigma"].float())
             dyn = torch.nn.functional.cross_entropy(out["next_regime_logits"].float(), next_regime)
             entropy = soft_code_usage_entropy(out["regime_probs"])

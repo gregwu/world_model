@@ -18,15 +18,18 @@ This follows the world-model principle that the latent state should support mult
 
 The probe deliberately does **not** retrain the network. This separates representation quality from a new head's capacity.
 
-Run:
+Run (train with `PYTHONPATH=src python scripts/train_5m.py --config configs/alpaca_5m_pure.yaml` first):
 
 ```bash
 PYTHONPATH=src python scripts/cross_sectional_probe.py \
-  --checkpoint artifacts/alpaca5m/best.pt \
-  --split test --max-days 40 --min-assets 100
+  --checkpoint artifacts/alpaca5m_pure/best.pt \
+  --split val --max-days 40 --min-assets 100
 ```
 
 Use complete days rather than a random sample: random row subsampling destroys the cross-section at each timestamp.
+For the pure-5m model the probe ranks by the market-neutral `relative_mu` head (`--signal return` uses the mean-return
+head). Standard errors are across trading days. 2026 is frozen in `configs/alpaca_5m_pure.yaml`: tune on `--split val`,
+and pass `--split test --final-test` once, for the final out-of-sample result.
 
 ## Decision gate
 

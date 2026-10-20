@@ -3,28 +3,42 @@ import argparse, json
 import numpy as np
 import torch
 from .data import make_loader, open_dataset
-from .train import device_from, build_model, to_device, encode_next_regime, autocast_for
+from .train import device_from, build_model, to_device, encode_next_regime, autocast_for, run_model
 
 
-def load_checkpoint(path, split, max_samples=None):
+def check_test_access(cfg, split, final_test=False):
+    """Refuse the test split when split.test_frozen is set, unless this is the deliberate final OOS test."""
+    if split=="test" and cfg["split"].get("test_frozen") and not final_test:
+        raise SystemExit("the test split is frozen (split.test_frozen in the config); tune on --split val, "
+                         "and pass --final-test only for the one final out-of-sample evaluation")
+
+
+def load_checkpoint(path, split, max_samples=None, final_test=False):
     ck=torch.load(path,map_location="cpu",weights_only=False); cfg=ck["cfg"]; s=cfg["split"]
+    check_test_access(cfg, split, final_test)
     ranges={"train":(s["train_start"],s["train_end"]),"val":(s["val_start"],s["val_end"]),"test":(s["test_start"],s["test_end"])}
     ds=open_dataset(cfg["data"]["out_path"],*ranges[split],ck["stats"],max_samples=max_samples,seed=cfg["seed"]); dev=device_from(cfg)
-    model=build_model(ds,len(ck["symbols"]),cfg["model"]).to(dev); model.load_state_dict(ck["model"]); model.eval()
+    if ck.get("model_type")=="pure_5m":  # v0.2 IntradayWorldModel (scripts/train_5m.py)
+        from .intraday_model import IntradayWorldModel
+        model=IntradayWorldModel(ds.intra_dim,len(ck["symbols"]),ds.returns.shape[-1],cfg["model"])
+    else:
+        model=build_model(ds,len(ck["symbols"]),cfg["model"])
+    model=model.to(dev); model.load_state_dict(ck["model"]); model.eval()
     return ck, cfg, ds, dev, model
 
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("--checkpoint",default="artifacts/best.pt"); ap.add_argument("--split",choices=["val","test"],default="test")
-    ap.add_argument("--max-samples",type=int,default=None,help="evaluate a fixed random subset of pairs (large packs)"); args=ap.parse_args()
-    ck,cfg,ds,dev,model=load_checkpoint(args.checkpoint,args.split,args.max_samples)
+    ap.add_argument("--max-samples",type=int,default=None,help="evaluate a fixed random subset of pairs (large packs)")
+    ap.add_argument("--final-test",action="store_true",help="allow the test split when the config sets split.test_frozen"); args=ap.parse_args()
+    ck,cfg,ds,dev,model=load_checkpoint(args.checkpoint,args.split,args.max_samples,args.final_test)
     loader=make_loader(ds,cfg["train"]["batch_size"],False)
     ys=[]; mus=[]; sigmas=[]; regimes=[]; nexts=[]; next_preds=[]
     with torch.no_grad():
         for b in loader:
             b=to_device(b,dev)
             with autocast_for(dev,cfg["train"].get("amp")):
-                out=model(b["daily"],b.get("intraday"),b["symbol_id"])
+                out=run_model(model,b)
             ys.append(b["future_returns"].cpu().numpy()); mus.append(out["return_mu"].float().cpu().numpy()); sigmas.append(np.exp(out["return_log_sigma"].float().cpu().numpy()))
             regimes.append(out["regime"].cpu().numpy()); next_preds.append(out["next_regime_logits"].float().argmax(-1).cpu().numpy())
             nexts.append(encode_next_regime(model,b,cfg["train"].get("amp")).cpu().numpy())

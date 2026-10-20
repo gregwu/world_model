@@ -53,7 +53,7 @@ def _windows_finite(finite_rows: np.ndarray, ends: np.ndarray, length: int) -> n
 
 def build_lazy_pack(
     out_dir: str,
-    daily_path: str,
+    daily_path: str | None,
     intraday_path: str,
     daily_lookback: int = 40,
     intraday_lookback: int = 455,
@@ -64,48 +64,57 @@ def build_lazy_pack(
     intraday_indicators: bool = False,
 ) -> dict:
     """Same sample definition as data.build_samples (daily context strictly before the sample date), stored lazily.
-    intraday_indicators appends 5m/1h %B, RSI, MACD histogram and 5m session-VWAP distance (features.py)."""
-    daily, daily_feats = _load_daily(daily_path, daily_indicators_path, daily_indicator_columns)
-    dgroups = {s: g.reset_index(drop=True) for s, g in daily.groupby("symbol")}
+    intraday_indicators appends 5m/1h %B, RSI, MACD histogram and 5m session-VWAP distance (features.py).
+    daily_path=None builds a pure-intraday pack: no daily arrays, and samples need no valid daily window."""
+    use_daily = bool(daily_path)
+    if use_daily:
+        daily, daily_feats = _load_daily(daily_path, daily_indicators_path, daily_indicator_columns)
+        dgroups = {s: g.reset_index(drop=True) for s, g in daily.groupby("symbol")}
+    else:
+        daily_feats, dgroups = [], {}
     feats = feature_columns() + (intraday_indicator_columns() if intraday_indicators else [])
     H = np.asarray(horizons_5m); max_h = int(H.max())
     L, Ld = intraday_lookback, daily_lookback
     symbols, skipped = [], []
-    chunks = {k: [] for k in ("intra_feats", "intra_ts", "daily_feats", "daily_ts", "anchor", "daily_end",
-                              "symbol_id", "future_returns", "timestamps_ns", "bar_index")}
+    keys = ["intra_feats", "intra_ts", "anchor", "symbol_id", "future_returns", "timestamps_ns", "bar_index"]
+    if use_daily: keys += ["daily_feats", "daily_ts", "daily_end"]
+    chunks = {k: [] for k in keys}
     ioff = doff = 0
     for sym, ig in _iter_intraday(intraday_path):
         dg = dgroups.get(sym)
-        if dg is None or len(ig) < L + max_h:
+        if (use_daily and dg is None) or len(ig) < L + max_h:
             skipped.append(sym); continue
         ig = add_bar_features(ig)
         if intraday_indicators:
             ig = add_intraday_indicators(ig)
         ivals = ig[feats].to_numpy(np.float32); closes = ig["close"].to_numpy(np.float64); stamps = _utc_ns(ig["timestamp"])
-        dvals = dg[daily_feats].to_numpy(np.float32)
-        idates = ig["timestamp"].dt.tz_convert(NY).dt.date.to_numpy()
-        ddates = dg["timestamp"].dt.tz_convert(NY).dt.date.to_numpy()
 
         i = np.arange(L - 1, len(ig) - max_h)
-        d_end = np.searchsorted(ddates, idates[i], side="left")  # days strictly before the sample date
-        ok = (closes[i] >= min_price) & (d_end - Ld >= 0)
+        ok = closes[i] >= min_price
         ok &= _windows_finite(np.isfinite(ivals).all(1), i, L)
-        dfin = np.isfinite(dvals).all(1)
-        ok[ok] &= _windows_finite(dfin, d_end[ok] - 1, Ld)
+        if use_daily:
+            dvals = dg[daily_feats].to_numpy(np.float32)
+            idates = ig["timestamp"].dt.tz_convert(NY).dt.date.to_numpy()
+            ddates = dg["timestamp"].dt.tz_convert(NY).dt.date.to_numpy()
+            d_end = np.searchsorted(ddates, idates[i], side="left")  # days strictly before the sample date
+            ok &= d_end - Ld >= 0
+            ok[ok] &= _windows_finite(np.isfinite(dvals).all(1), d_end[ok] - 1, Ld)
         with np.errstate(divide="ignore", invalid="ignore"):
             y = np.log(closes[i[:, None] + H[None, :]] / closes[i][:, None]).astype(np.float32)
         ok &= np.isfinite(y).all(1)
         if not ok.any():
             skipped.append(sym); continue
 
-        sid = len(symbols); symbols.append(sym); i = i[ok]
+        sid = len(symbols); symbols.append(sym)
         chunks["intra_feats"].append(ivals); chunks["intra_ts"].append(stamps)
-        chunks["daily_feats"].append(dvals); chunks["daily_ts"].append(_utc_ns(dg["timestamp"]))
-        chunks["anchor"].append(i + ioff); chunks["daily_end"].append(d_end[ok] + doff)
-        chunks["symbol_id"].append(np.full(len(i), sid, dtype=np.int64)); chunks["future_returns"].append(y[ok])
-        chunks["timestamps_ns"].append(stamps[i]); chunks["bar_index"].append(i)
-        ioff += len(ivals); doff += len(dvals)
-        print(f"  {sym}: {len(i):,} samples", flush=True)
+        chunks["anchor"].append(i[ok] + ioff)
+        chunks["symbol_id"].append(np.full(int(ok.sum()), sid, dtype=np.int64)); chunks["future_returns"].append(y[ok])
+        chunks["timestamps_ns"].append(stamps[i[ok]]); chunks["bar_index"].append(i[ok])
+        if use_daily:
+            chunks["daily_feats"].append(dvals); chunks["daily_ts"].append(_utc_ns(dg["timestamp"]))
+            chunks["daily_end"].append(d_end[ok] + doff); doff += len(dvals)
+        ioff += len(ivals)
+        print(f"  {sym}: {int(ok.sum()):,} samples", flush=True)
 
     if not symbols:
         raise RuntimeError("No valid samples were built. Check history depth and feature warmup.")
@@ -116,7 +125,7 @@ def build_lazy_pack(
         arr = np.concatenate(parts).astype(dtypes.get(k, np.int64), copy=False)
         np.save(out / f"{k}.npy", arr); sizes[k] = list(arr.shape); chunks[k] = None
     meta = {"format": "lazy", "symbols": symbols, "skipped_symbols": skipped, "intraday_lookback": L,
-            "daily_lookback": Ld, "horizons": [int(h) for h in H], "intraday_features": feats,
+            "daily_lookback": Ld if use_daily else 0, "horizons": [int(h) for h in H], "intraday_features": feats,
             "daily_features": daily_feats, "shapes": sizes}
     json.dump(meta, open(out / "meta.json", "w"), indent=1)
     return meta
@@ -129,20 +138,21 @@ class LazyWorldModelDataset(Dataset):
                  max_samples: int | None = None, seed: int = 0):
         d = Path(pack_dir); meta = json.load(open(d / "meta.json"))
         self.intra_feats = np.load(d / "intra_feats.npy", mmap_mode="r")
-        self.daily_feats = np.load(d / "daily_feats.npy", mmap_mode="r")
+        self.has_daily = (d / "daily_feats.npy").exists()  # pure-intraday packs have no daily arrays
+        self.daily_feats = np.load(d / "daily_feats.npy", mmap_mode="r") if self.has_daily else None
         self._dir = d
         ts = np.load(d / "timestamps_ns.npy")
         lo = pd.Timestamp(str(start), tz="UTC").value; hi = pd.Timestamp(str(end) + " 23:59:59", tz="UTC").value
         idx = np.flatnonzero((ts >= lo) & (ts <= hi))
         self.timestamps_ns = ts[idx]; self._range = (lo, hi)
         self.anchor = np.load(d / "anchor.npy", mmap_mode="r")[idx]
-        self.daily_end = np.load(d / "daily_end.npy", mmap_mode="r")[idx]
+        self.daily_end = np.load(d / "daily_end.npy", mmap_mode="r")[idx] if self.has_daily else None
         self.symbol_id = np.load(d / "symbol_id.npy", mmap_mode="r")[idx]
         self.returns = np.load(d / "future_returns.npy", mmap_mode="r")[idx]
         bar_index = np.load(d / "bar_index.npy", mmap_mode="r")[idx]
         self.symbols = meta["symbols"]
         self._oi = np.arange(-meta["intraday_lookback"] + 1, 1); self._od = np.arange(-meta["daily_lookback"], 0)
-        self.daily_dim = self.daily_feats.shape[1]; self.intra_dim = self.intra_feats.shape[1]
+        self.daily_dim = self.daily_feats.shape[1] if self.has_daily else 0; self.intra_dim = self.intra_feats.shape[1]
         self.intraday = None  # windows are never materialized; see intraday_windows()
         self.stats = stats
         self.next_idx, self.pair_rows = pair_next(self.symbol_id, bar_index, self.timestamps_ns)
@@ -161,15 +171,16 @@ class LazyWorldModelDataset(Dataset):
 
     def __getitems__(self, rows):
         i = self.pair_rows[np.asarray(rows)]; j = self.next_idx[i]
-        return {
-            "daily": torch.from_numpy(self.daily_windows(i)),
+        b = {
             "intraday": torch.from_numpy(self.intraday_windows(i)),
             "symbol_id": torch.from_numpy(np.ascontiguousarray(self.symbol_id[i])),
             "future_returns": torch.from_numpy(np.ascontiguousarray(self.returns[i])),
             "timestamp_ns": torch.from_numpy(self.timestamps_ns[i]),
-            "next_daily": torch.from_numpy(self.daily_windows(j)),
             "next_intraday": torch.from_numpy(self.intraday_windows(j)),
         }
+        if self.has_daily:
+            b["daily"] = torch.from_numpy(self.daily_windows(i)); b["next_daily"] = torch.from_numpy(self.daily_windows(j))
+        return b
 
     def __getitem__(self, row):
         return {k: v[0] for k, v in self.__getitems__([row]).items()}
@@ -177,7 +188,7 @@ class LazyWorldModelDataset(Dataset):
     def fit_stats(self, max_rows: int = 5_000_000, seed: int = 0) -> dict:
         """Per-feature mean/std over rows inside this dataset's date range (a random subset of at most max_rows)."""
         rng = np.random.default_rng(seed); lo, hi = self._range; stats = {}
-        for key, name in (("daily", "daily"), ("intra", "intra")):
+        for key, name in ((("daily", "daily"),) if self.has_daily else ()) + (("intra", "intra"),):
             ts = np.load(self._dir / f"{name}_ts.npy", mmap_mode="r")
             rows = np.flatnonzero((ts >= lo) & (ts <= hi))
             if len(rows) > max_rows: rows = np.sort(rng.choice(rows, max_rows, replace=False))
