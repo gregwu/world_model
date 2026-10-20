@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Intraday Volatility Profile</title>
+<!-- Standalone copy of https://claude.ai/artifact/TLj68BTvWf8nFiaCVGXzNF . Data: docs/intraday_volatility_profile.csv,
+     regenerate with: PYTHONPATH=src python scripts/intraday_profile.py --pack data/alpaca5m/pack --csv out.csv -->
+<style>
+  /* Standalone copy of the claude.ai dashboard page. Tokens stand in for the dashboard viewer's theme. */
+  :root {
+    --bg: #fcfcfb; --color-panel: #ffffff; --color-fg: #1f1e1d; --color-fg-muted: #5f5e5a; --color-border-line: #e4e2dc;
+    --color-bad: #c4342c; --series-1: #2a78d6; --series-2: #eb6834;
+    --cds-chart-grid: #ecebe6; --cds-chart-axis: #b9b7ae; --cds-chart-reference: #8f8d84;
+    --cds-surface-popover: #ffffff; --cds-border: #dcdad3; --cds-shadow-popover: 0 4px 16px rgba(30, 28, 24, .12);
+    --cds-text-secondary: #5f5e5a;
+    --font-anthropic-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-anthropic-serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --cds-font-size-caption: .8125rem; --cds-font-size-body: .9375rem; --cds-font-size-heading: 1.0625rem; --cds-font-size-title: 1.75rem;
+    --cds-font-weight-medium: 550;
+    --cds-gap-xs: 4px; --cds-gap-sm: 8px; --cds-gap-md: 16px; --cds-gap-lg: 28px;
+    --cds-pad-xs: 4px; --cds-pad-sm: 8px; --cds-pad-lg: 20px; --cds-radius: 8px; --cds-dur-slow: 300ms;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg: #1a1a19; --color-panel: #222220; --color-fg: #f0efec; --color-fg-muted: #b3b2a8; --color-border-line: #3a3936;
+    --color-bad: #e5655b; --series-1: #3987e5; --series-2: #d95926;
+    --cds-chart-grid: #302f2c; --cds-chart-axis: #5a5953; --cds-chart-reference: #85837b;
+    --cds-surface-popover: #2a2a27; --cds-border: #44433f; --cds-shadow-popover: 0 4px 16px rgba(0, 0, 0, .45);
+    --cds-text-secondary: #c3c2b7; color-scheme: dark; } }
+  :root[data-theme="dark"] {
+    --bg: #1a1a19; --color-panel: #222220; --color-fg: #f0efec; --color-fg-muted: #b3b2a8; --color-border-line: #3a3936;
+    --color-bad: #e5655b; --series-1: #3987e5; --series-2: #d95926;
+    --cds-chart-grid: #302f2c; --cds-chart-axis: #5a5953; --cds-chart-reference: #85837b;
+    --cds-surface-popover: #2a2a27; --cds-border: #44433f; --cds-shadow-popover: 0 4px 16px rgba(0, 0, 0, .45);
+    --cds-text-secondary: #c3c2b7; color-scheme: dark; }
+  body { margin: 0; background: var(--bg); color: var(--color-fg); font-family: var(--font-anthropic-sans); }
+  #dash-root { max-width: 72rem; margin-inline: auto; padding-block: 32px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+
+  .iv { display: grid; gap: var(--cds-gap-lg); font-family: var(--font-anthropic-sans); }
+  .iv-head { display: grid; gap: var(--cds-gap-sm); max-width: 62rem; }
+  .iv-title { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; text-wrap: balance; }
+  .iv-lede { margin: 0; color: var(--color-fg-muted); font-size: var(--cds-font-size-body); line-height: 1.5; max-width: 65ch; }
+  .iv-lede b, .iv-tile b { font-weight: 600; color: var(--color-fg); }
+  .iv-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); gap: var(--cds-gap-md); }
+  .iv-tile { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: var(--cds-gap-xs); align-content: start; }
+  .iv-tile-label { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .iv-tile-num { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .iv-tile-sub { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); font-variant-numeric: tabular-nums; }
+  .iv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); gap: var(--cds-gap-md); }
+  .iv-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: var(--cds-gap-sm); min-width: 0; }
+  .iv-card h2 { margin: 0; font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); }
+  .iv-note { margin: 0; font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); line-height: 1.45; }
+  .iv-chart { position: relative; min-height: 260px; }
+  .iv-chart svg { display: block; overflow: visible; }
+  .iv-chart text { font-family: var(--font-anthropic-sans); font-size: var(--cds-font-size-caption); fill: var(--color-fg-muted); font-variant-numeric: tabular-nums; }
+  .iv-chart .iv-endlabel { fill: var(--color-fg); }
+  .iv-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .iv-legend span { display: inline-flex; align-items: center; gap: var(--cds-gap-xs); }
+  .iv-legend i { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
+  .iv-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); white-space: nowrap; font-variant-numeric: tabular-nums; z-index: 2; }
+  .iv-tip .t { color: var(--cds-text-secondary); margin-bottom: 2px; }
+  .iv-tip .r { display: flex; align-items: center; gap: var(--cds-gap-xs); }
+  .iv-tip .sw { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .iv-tablebox { max-height: 22rem; overflow: auto; border-top: 1px solid var(--color-border-line); }
+  .iv-table { width: 100%; border-collapse: collapse; font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+  .iv-table th, .iv-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); text-align: right; border-bottom: 1px solid var(--color-border-line); }
+  .iv-table th:first-child, .iv-table td:first-child { text-align: left; }
+  .iv-table th { position: sticky; top: 0; background: var(--color-panel); color: var(--color-fg-muted); font-weight: var(--cds-font-weight-medium); }
+  [data-dash-source-state=empty] { color: transparent; }
+  [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+  .iv-fail { display: flex; align-items: center; justify-content: center; gap: var(--cds-gap-xs); min-height: 260px; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .iv-fail::before { content: ""; width: .375rem; height: .375rem; border-radius: 50%; background: var(--color-bad); }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+</head>
+<body>
+<div id="dash-root">
+<div class="iv">
+  <header class="iv-head">
+    <h1 class="iv-title" id="title">Intraday volatility profile</h1>
+    <p class="iv-lede" id="takeaway">
+      The first 5-minute bar of the session moves <b data-source="profile" data-field="range_vs_midday" data-where="time_et=09:30" class="dash-skeleton">—</b>× as much as a midday bar.
+      Volatility bottoms out at <b data-source="midday_low" data-field="time_et" data-row="0" class="dash-skeleton">—</b> ET, then rises only modestly into the close,
+      where volume jumps to <b data-source="profile" data-field="volume_vs_midday" data-where="time_et=15:55" class="dash-skeleton">—</b>× midday on the closing auction.
+    </p>
+  </header>
+
+  <section class="iv-tiles" aria-label="Headline figures">
+    <div class="iv-tile" id="tile-open">
+      <span class="iv-tile-label">First bar, 09:30 · median range</span>
+      <span class="iv-tile-num"><span data-source="profile" data-field="median_range_pct" data-where="time_et=09:30" class="dash-skeleton">—</span>%</span>
+      <span class="iv-tile-sub"><span data-source="profile" data-field="range_vs_midday" data-where="time_et=09:30">—</span>× midday</span>
+    </div>
+    <div class="iv-tile" id="tile-low">
+      <span class="iv-tile-label">Quietest bar · median range</span>
+      <span class="iv-tile-num"><span data-source="midday_low" data-field="median_range_pct" data-row="0" class="dash-skeleton">—</span>%</span>
+      <span class="iv-tile-sub">at <span data-source="midday_low" data-field="time_et" data-row="0">—</span> ET</span>
+    </div>
+    <div class="iv-tile" id="tile-close">
+      <span class="iv-tile-label">Last bar, 15:55 · volume</span>
+      <span class="iv-tile-num"><span data-source="profile" data-field="volume_vs_midday" data-where="time_et=15:55" class="dash-skeleton">—</span>×</span>
+      <span class="iv-tile-sub">midday volume; price range <span data-source="profile" data-field="range_vs_midday" data-where="time_et=15:55">—</span>×</span>
+    </div>
+  </section>
+
+  <div class="iv-grid">
+    <section class="iv-card" id="range-card">
+      <h2>Median 5-minute bar range by time of day</h2>
+      <p class="iv-note">(high − low) / previous close, % · regular session, New York time. The dashed line marks 14:00, when FOMC statements are released.</p>
+      <div class="iv-chart" id="range-chart" data-source="profile"></div>
+    </section>
+
+    <section class="iv-card" id="ratio-card">
+      <h2>Price range and volume, relative to midday</h2>
+      <p class="iv-note">Each slot divided by its 12:00–14:00 average (1× = midday). Volatility is a reverse J; volume is a U.</p>
+      <div class="iv-legend" data-source="profile">
+        <span><i id="lg-range"></i>Price range</span>
+        <span><i id="lg-vol"></i>Volume</span>
+      </div>
+      <div class="iv-chart" id="ratio-chart" data-source="profile"></div>
+    </section>
+  </div>
+
+  <section class="iv-card" id="table-card">
+    <h2>All 78 five-minute slots</h2>
+    <p class="iv-note">Medians over about 12M randomly sampled regular-session 5m bars from 529 tickers (current S&amp;P 500 plus the most liquid of 2014), 2016–2026, Alpaca SIP data. The 09:30 bar's |return| is measured from the previous close, so it includes the overnight gap; its range does not.</p>
+    <div class="iv-tablebox">
+      <table class="iv-table" id="profile-table" data-source="profile" data-row-key="time_et">
+        <thead><tr>
+          <th data-field="time_et">Time (ET)</th>
+          <th data-field="median_range_pct">Median range %</th>
+          <th data-field="median_abs_return_pct">Median |return| %</th>
+          <th data-field="range_vs_midday">Range vs midday</th>
+          <th data-field="volume_vs_midday">Volume vs midday</th>
+          <th data-field="bars">Bars</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script type="application/json" id="iv-data">[{"time_et":"09:30","median_range_pct":"0.6809","median_abs_return_pct":"0.5035","range_vs_midday":"5.312","volume_vs_midday":"4.053","bars":"155179"},{"time_et":"09:35","median_range_pct":"0.448","median_abs_return_pct":"0.2208","range_vs_midday":"3.495","volume_vs_midday":"1.853","bars":"153898"},{"time_et":"09:40","median_range_pct":"0.3751","median_abs_return_pct":"0.1831","range_vs_midday":"2.927","volume_vs_midday":"1.751","bars":"153820"},{"time_et":"09:45","median_range_pct":"0.3467","median_abs_return_pct":"0.1715","range_vs_midday":"2.705","volume_vs_midday":"1.832","bars":"153877"},{"time_et":"09:50","median_range_pct":"0.31","median_abs_return_pct":"0.1521","range_vs_midday":"2.419","volume_vs_midday":"1.705","bars":"154715"},{"time_et":"09:55","median_range_pct":"0.2814","median_abs_return_pct":"0.137","range_vs_midday":"2.196","volume_vs_midday":"1.632","bars":"153704"},{"time_et":"10:00","median_range_pct":"0.3039","median_abs_return_pct":"0.1493","range_vs_midday":"2.371","volume_vs_midday":"1.888","bars":"154750"},{"time_et":"10:05","median_range_pct":"0.2654","median_abs_return_pct":"0.1298","range_vs_midday":"2.071","volume_vs_midday":"1.681","bars":"154523"},{"time_et":"10:10","median_range_pct":"0.2513","median_abs_return_pct":"0.1241","range_vs_midday":"1.96","volume_vs_midday":"1.627","bars":"154100"},{"time_et":"10:15","median_range_pct":"0.2381","median_abs_return_pct":"0.117","range_vs_midday":"1.858","volume_vs_midday":"1.55","bars":"154638"},{"time_et":"10:20","median_range_pct":"0.228","median_abs_return_pct":"0.1118","range_vs_midday":"1.779","volume_vs_midday":"1.492","bars":"154704"},{"time_et":"10:25","median_range_pct":"0.2183","median_abs_return_pct":"0.1073","range_vs_midday":"1.703","volume_vs_midday":"1.456","bars":"154537"},{"time_et":"10:30","median_range_pct":"0.2237","median_abs_return_pct":"0.1111","range_vs_midday":"1.746","volume_vs_midday":"1.521","bars":"153624"},{"time_et":"10:35","median_range_pct":"0.2108","median_abs_return_pct":"0.1042","range_vs_midday":"1.645","volume_vs_midday":"1.453","bars":"154619"},{"time_et":"10:40","median_range_pct":"0.2013","median_abs_return_pct":"0.0998","range_vs_midday":"1.571","volume_vs_midday":"1.402","bars":"154268"},{"time_et":"10:45","median_range_pct":"0.1983","median_abs_return_pct":"0.0981","range_vs_midday":"1.547","volume_vs_midday":"1.4","bars":"154084"},{"time_et":"10:50","median_range_pct":"0.1928","median_abs_return_pct":"0.096","range_vs_midday":"1.505","volume_vs_midday":"1.368","bars":"154379"},{"time_et":"10:55","median_range_pct":"0.1879","median_abs_return_pct":"0.0921","range_vs_midday":"1.466","volume_vs_midday":"1.384","bars":"153932"},{"time_et":"11:00","median_range_pct":"0.1945","median_abs_return_pct":"0.0975","range_vs_midday":"1.517","volume_vs_midday":"1.398","bars":"154434"},{"time_et":"11:05","median_range_pct":"0.1808","median_abs_return_pct":"0.0903","range_vs_midday":"1.411","volume_vs_midday":"1.312","bars":"154784"},{"time_et":"11:10","median_range_pct":"0.1759","median_abs_return_pct":"0.0879","range_vs_midday":"1.373","volume_vs_midday":"1.287","bars":"153890"},{"time_et":"11:15","median_range_pct":"0.1746","median_abs_return_pct":"0.0863","range_vs_midday":"1.362","volume_vs_midday":"1.287","bars":"154141"},{"time_et":"11:20","median_range_pct":"0.1689","median_abs_return_pct":"0.084","range_vs_midday":"1.318","volume_vs_midday":"1.255","bars":"153801"},{"time_et":"11:25","median_range_pct":"0.1674","median_abs_return_pct":"0.0829","range_vs_midday":"1.306","volume_vs_midday":"1.268","bars":"154041"},{"time_et":"11:30","median_range_pct":"0.1707","median_abs_return_pct":"0.0849","range_vs_midday":"1.332","volume_vs_midday":"1.278","bars":"155100"},{"time_et":"11:35","median_range_pct":"0.1613","median_abs_return_pct":"0.0807","range_vs_midday":"1.258","volume_vs_midday":"1.185","bars":"154315"},{"time_et":"11:40","median_range_pct":"0.1567","median_abs_return_pct":"0.0785","range_vs_midday":"1.223","volume_vs_midday":"1.141","bars":"153422"},{"time_et":"11:45","median_range_pct":"0.1522","median_abs_return_pct":"0.0766","range_vs_midday":"1.187","volume_vs_midday":"1.114","bars":"154173"},{"time_et":"11:50","median_range_pct":"0.1499","median_abs_return_pct":"0.0745","range_vs_midday":"1.17","volume_vs_midday":"1.11","bars":"154975"},{"time_et":"11:55","median_range_pct":"0.1473","median_abs_return_pct":"0.0739","range_vs_midday":"1.149","volume_vs_midday":"1.089","bars":"154230"},{"time_et":"12:00","median_range_pct":"0.1515","median_abs_return_pct":"0.0766","range_vs_midday":"1.182","volume_vs_midday":"1.107","bars":"154443"},{"time_et":"12:05","median_range_pct":"0.1417","median_abs_return_pct":"0.0716","range_vs_midday":"1.106","volume_vs_midday":"1.054","bars":"154258"},{"time_et":"12:10","median_range_pct":"0.1367","median_abs_return_pct":"0.0686","range_vs_midday":"1.067","volume_vs_midday":"1.024","bars":"153458"},{"time_et":"12:15","median_range_pct":"0.1379","median_abs_return_pct":"0.0701","range_vs_midday":"1.076","volume_vs_midday":"1.041","bars":"154155"},{"time_et":"12:20","median_range_pct":"0.1349","median_abs_return_pct":"0.0682","range_vs_midday":"1.053","volume_vs_midday":"1.016","bars":"153705"},{"time_et":"12:25","median_range_pct":"0.1306","median_abs_return_pct":"0.0655","range_vs_midday":"1.019","volume_vs_midday":"0.989","bars":"153814"},{"time_et":"12:30","median_range_pct":"0.1335","median_abs_return_pct":"0.0679","range_vs_midday":"1.042","volume_vs_midday":"1.021","bars":"154008"},{"time_et":"12:35","median_range_pct":"0.1291","median_abs_return_pct":"0.0652","range_vs_midday":"1.007","volume_vs_midday":"0.979","bars":"153887"},{"time_et":"12:40","median_range_pct":"0.1263","median_abs_return_pct":"0.064","range_vs_midday":"0.986","volume_vs_midday":"0.966","bars":"154105"},{"time_et":"12:45","median_range_pct":"0.1271","median_abs_return_pct":"0.0638","range_vs_midday":"0.992","volume_vs_midday":"0.965","bars":"153619"},{"time_et":"12:50","median_range_pct":"0.1258","median_abs_return_pct":"0.0637","range_vs_midday":"0.982","volume_vs_midday":"0.957","bars":"154129"},{"time_et":"12:55","median_range_pct":"0.1232","median_abs_return_pct":"0.0611","range_vs_midday":"0.961","volume_vs_midday":"0.964","bars":"154104"},{"time_et":"13:00","median_range_pct":"0.1327","median_abs_return_pct":"0.0673","range_vs_midday":"1.035","volume_vs_midday":"1.023","bars":"154648"},{"time_et":"13:05","median_range_pct":"0.1254","median_abs_return_pct":"0.0638","range_vs_midday":"0.978","volume_vs_midday":"0.952","bars":"153500"},{"time_et":"13:10","median_range_pct":"0.123","median_abs_return_pct":"0.0624","range_vs_midday":"0.96","volume_vs_midday":"0.966","bars":"153272"},{"time_et":"13:15","median_range_pct":"0.1228","median_abs_return_pct":"0.0621","range_vs_midday":"0.958","volume_vs_midday":"0.964","bars":"153087"},{"time_et":"13:20","median_range_pct":"0.1222","median_abs_return_pct":"0.0612","range_vs_midday":"0.953","volume_vs_midday":"0.967","bars":"152921"},{"time_et":"13:25","median_range_pct":"0.1208","median_abs_return_pct":"0.0609","range_vs_midday":"0.942","volume_vs_midday":"0.969","bars":"152570"},{"time_et":"13:30","median_range_pct":"0.126","median_abs_return_pct":"0.0639","range_vs_midday":"0.983","volume_vs_midday":"1.022","bars":"153669"},{"time_et":"13:35","median_range_pct":"0.1231","median_abs_return_pct":"0.0622","range_vs_midday":"0.961","volume_vs_midday":"1.007","bars":"152697"},{"time_et":"13:40","median_range_pct":"0.122","median_abs_return_pct":"0.062","range_vs_midday":"0.952","volume_vs_midday":"1.003","bars":"153238"},{"time_et":"13:45","median_range_pct":"0.1207","median_abs_return_pct":"0.0607","range_vs_midday":"0.941","volume_vs_midday":"1.0","bars":"152901"},{"time_et":"13:50","median_range_pct":"0.1195","median_abs_return_pct":"0.0599","range_vs_midday":"0.932","volume_vs_midday":"1.013","bars":"153226"},{"time_et":"13:55","median_range_pct":"0.1195","median_abs_return_pct":"0.0597","range_vs_midday":"0.933","volume_vs_midday":"1.033","bars":"153707"},{"time_et":"14:00","median_range_pct":"0.1404","median_abs_return_pct":"0.0711","range_vs_midday":"1.096","volume_vs_midday":"1.178","bars":"152752"},{"time_et":"14:05","median_range_pct":"0.1303","median_abs_return_pct":"0.0657","range_vs_midday":"1.017","volume_vs_midday":"1.129","bars":"153606"},{"time_et":"14:10","median_range_pct":"0.1265","median_abs_return_pct":"0.0628","range_vs_midday":"0.987","volume_vs_midday":"1.124","bars":"153396"},{"time_et":"14:15","median_range_pct":"0.1268","median_abs_return_pct":"0.0637","range_vs_midday":"0.99","volume_vs_midday":"1.136","bars":"153401"},{"time_et":"14:20","median_range_pct":"0.1246","median_abs_return_pct":"0.062","range_vs_midday":"0.972","volume_vs_midday":"1.131","bars":"153475"},{"time_et":"14:25","median_range_pct":"0.1245","median_abs_return_pct":"0.0614","range_vs_midday":"0.971","volume_vs_midday":"1.152","bars":"153319"},{"time_et":"14:30","median_range_pct":"0.1296","median_abs_return_pct":"0.0643","range_vs_midday":"1.011","volume_vs_midday":"1.206","bars":"153845"},{"time_et":"14:35","median_range_pct":"0.1236","median_abs_return_pct":"0.0606","range_vs_midday":"0.964","volume_vs_midday":"1.161","bars":"153607"},{"time_et":"14:40","median_range_pct":"0.1231","median_abs_return_pct":"0.0605","range_vs_midday":"0.961","volume_vs_midday":"1.186","bars":"152815"},{"time_et":"14:45","median_range_pct":"0.1241","median_abs_return_pct":"0.0613","range_vs_midday":"0.968","volume_vs_midday":"1.207","bars":"153667"},{"time_et":"14:50","median_range_pct":"0.1236","median_abs_return_pct":"0.0605","range_vs_midday":"0.964","volume_vs_midday":"1.237","bars":"154188"},{"time_et":"14:55","median_range_pct":"0.1249","median_abs_return_pct":"0.0604","range_vs_midday":"0.974","volume_vs_midday":"1.295","bars":"153040"},{"time_et":"15:00","median_range_pct":"0.1381","median_abs_return_pct":"0.069","range_vs_midday":"1.078","volume_vs_midday":"1.432","bars":"153270"},{"time_et":"15:05","median_range_pct":"0.1294","median_abs_return_pct":"0.0633","range_vs_midday":"1.009","volume_vs_midday":"1.425","bars":"153192"},{"time_et":"15:10","median_range_pct":"0.1308","median_abs_return_pct":"0.0642","range_vs_midday":"1.02","volume_vs_midday":"1.493","bars":"153423"},{"time_et":"15:15","median_range_pct":"0.1313","median_abs_return_pct":"0.0629","range_vs_midday":"1.024","volume_vs_midday":"1.594","bars":"153606"},{"time_et":"15:20","median_range_pct":"0.1317","median_abs_return_pct":"0.0641","range_vs_midday":"1.028","volume_vs_midday":"1.669","bars":"153336"},{"time_et":"15:25","median_range_pct":"0.1317","median_abs_return_pct":"0.063","range_vs_midday":"1.027","volume_vs_midday":"1.785","bars":"153397"},{"time_et":"15:30","median_range_pct":"0.1521","median_abs_return_pct":"0.0736","range_vs_midday":"1.187","volume_vs_midday":"2.278","bars":"153686"},{"time_et":"15:35","median_range_pct":"0.1469","median_abs_return_pct":"0.0699","range_vs_midday":"1.146","volume_vs_midday":"2.387","bars":"154189"},{"time_et":"15:40","median_range_pct":"0.1481","median_abs_return_pct":"0.0705","range_vs_midday":"1.155","volume_vs_midday":"2.734","bars":"153937"},{"time_et":"15:45","median_range_pct":"0.1649","median_abs_return_pct":"0.0784","range_vs_midday":"1.287","volume_vs_midday":"3.521","bars":"153422"},{"time_et":"15:50","median_range_pct":"0.2042","median_abs_return_pct":"0.0925","range_vs_midday":"1.593","volume_vs_midday":"5.472","bars":"153473"},{"time_et":"15:55","median_range_pct":"0.2249","median_abs_return_pct":"0.0979","range_vs_midday":"1.755","volume_vs_midday":"12.485","bars":"154109"}]</script>
+<script>
+// Minimal stand-in for the claude.ai dashboard runtime: one embedded dataset, calcs, redraw on resize.
+window.dash = (() => {
+  const rows = JSON.parse(document.getElementById('iv-data').textContent);
+  const calcs = {};
+  const api = {
+    colors: ['var(--series-1)', 'var(--series-2)'],
+    calc(id, spec) { calcs[id] = () => spec.fn(...spec.inputs.map((i) => api.data(i).data)); },
+    data(id) {
+      if (id === 'profile') return { status: 'ok', data: rows, columns: Object.keys(rows[0]), meta: [] };
+      if (calcs[id]) return { status: 'ok', data: calcs[id](), meta: [] };
+      return { status: 'missing', data: [], meta: [] };
+    },
+    onData(fn) { fn(); let t; window.addEventListener('resize', () => { clearTimeout(t); t = setTimeout(fn, 150); }); },
+  };
+  return api;
+})();
+</script>
+<script>
+(() => {
+  const num = (v) => Number(v);
+  const mins = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+  const label = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+  dash.calc('midday_low', {
+    inputs: ['profile'],
+    title: 'Quietest 5-minute slot',
+    description: 'The time slot with the lowest median bar range.',
+    fn: (profile) => {
+      const low = profile.reduce((a, r) => (Number(r.median_range_pct) < Number(a.median_range_pct) ? r : a));
+      return [{ time_et: low.time_et, median_range_pct: low.median_range_pct, range_vs_midday: low.range_vs_midday }];
+    },
+  });
+
+  const tip = (box) => {
+    let el = box.querySelector('.iv-tip');
+    if (!el) { el = document.createElement('div'); el.className = 'iv-tip'; el.hidden = true; box.appendChild(el); }
+    return el;
+  };
+  const placeTip = (box, el, x, y) => {
+    const w = el.offsetWidth, h = el.offsetHeight, bw = box.clientWidth;
+    el.style.left = `${Math.max(0, Math.min(bw - w, x + 12 > bw - w ? x - w - 12 : x + 12))}px`;
+    el.style.top = `${Math.max(0, y - h - 8)}px`;
+  };
+  const fail = (box) => { box.innerHTML = ''; const d = document.createElement('div'); d.className = 'iv-fail'; d.textContent = 'Failed to load'; box.appendChild(d); };
+  const xTicks = [570, 630, 690, 750, 810, 870, 930];
+
+  function drawRange(rows) {
+    const box = document.getElementById('range-chart');
+    box.innerHTML = '';
+    const W = Math.max(280, box.clientWidth), H = 260, m = { t: 12, r: 14, b: 26, l: 44 };
+    const x = d3.scaleLinear([570, 955], [m.l, W - m.r]);
+    const ymax = d3.max(rows, (r) => r.range);
+    const y = d3.scaleLinear([0, ymax * 1.05], [H - m.b, m.t]).nice();
+    const svg = d3.select(box).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img')
+      .attr('aria-label', 'Line chart of median 5-minute bar range by time of day');
+    const defs = svg.append('defs');
+    const g = defs.append('linearGradient').attr('id', 'iv-fade').attr('x1', 0).attr('x2', 0).attr('y1', 0).attr('y2', 1);
+    [[0, .26], [.25, .16], [.5, .08], [.75, .03], [1, 0]].forEach(([o, a]) =>
+      g.append('stop').attr('offset', o).attr('style', `stop-color: ${dash.colors[0]}; stop-opacity: ${a}`));
+    svg.append('g').selectAll('line').data(y.ticks(5)).join('line')
+      .attr('x1', m.l).attr('x2', W - m.r).attr('y1', (d) => y(d)).attr('y2', (d) => y(d))
+      .attr('stroke', 'var(--cds-chart-grid)').attr('stroke-width', 1);
+    svg.append('g').selectAll('text').data(y.ticks(5)).join('text')
+      .attr('x', m.l - 8).attr('y', (d) => y(d)).attr('dy', '0.32em').attr('text-anchor', 'end').text((d) => `${d3.format('.1f')(d)}%`);
+    svg.append('g').selectAll('text').data(xTicks).join('text')
+      .attr('x', (d) => x(d)).attr('y', H - 6).attr('text-anchor', 'middle').text(label);
+    svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', H - m.b).attr('y2', H - m.b).attr('stroke', 'var(--cds-chart-axis)');
+    svg.append('line').attr('x1', x(840)).attr('x2', x(840)).attr('y1', m.t).attr('y2', H - m.b)
+      .attr('stroke', 'var(--cds-chart-reference)').attr('stroke-dasharray', '3 3');
+    svg.append('path').datum(rows).attr('fill', 'url(#iv-fade)')
+      .attr('d', d3.area().x((r) => x(r.m)).y0(H - m.b).y1((r) => y(r.range)));
+    svg.append('path').datum(rows).attr('fill', 'none').attr('stroke', dash.colors[0]).attr('stroke-width', 2)
+      .attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round').attr('d', d3.line().x((r) => x(r.m)).y((r) => y(r.range)));
+    const first = rows[0];
+    svg.append('circle').attr('cx', x(first.m)).attr('cy', y(first.range)).attr('r', 4).attr('fill', dash.colors[0])
+      .attr('stroke', 'var(--color-panel)').attr('stroke-width', 2);
+    svg.append('text').attr('class', 'iv-endlabel').attr('x', x(first.m) + 9).attr('y', y(first.range)).attr('dy', '0.32em')
+      .text(`${d3.format('.2f')(first.range)}% at the open`);
+    hover(box, svg, rows, x, (r) => [[dash.colors[0], 'Range', `${d3.format('.3f')(r.range)}%`], [null, '|Return|', `${d3.format('.3f')(r.absr)}%`]],
+      [{ key: 'range', y, color: dash.colors[0] }], m, H);
+  }
+
+  function drawRatio(rows) {
+    const box = document.getElementById('ratio-chart');
+    box.innerHTML = '';
+    document.getElementById('lg-range').style.background = dash.colors[0];
+    document.getElementById('lg-vol').style.background = dash.colors[1];
+    const W = Math.max(280, box.clientWidth), H = 260;
+    const last = rows[rows.length - 1];
+    const endText = [`Volume ${d3.format('.1f')(last.vol)}×`, `Range ${d3.format('.1f')(last.rng)}×`];
+    const probe = d3.select(box).append('svg').attr('width', 0).attr('height', 0);
+    const endW = d3.max(endText, (t) => { const n = probe.append('text').attr('font-size', 12).text(t).node(); const w = n.getComputedTextLength(); n.remove(); return w; });
+    probe.remove();
+    const m = { t: 12, r: Math.ceil(endW) + 14, b: 26, l: 36 };
+    const x = d3.scaleLinear([570, 955], [m.l, W - m.r]);
+    const ymax = d3.max(rows, (r) => Math.max(r.vol, r.rng));
+    const y = d3.scaleLinear([0, ymax * 1.05], [H - m.b, m.t]).nice();
+    const svg = d3.select(box).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img')
+      .attr('aria-label', 'Line chart of price range and volume relative to midday by time of day');
+    svg.append('g').selectAll('line').data(y.ticks(5)).join('line')
+      .attr('x1', m.l).attr('x2', W - m.r).attr('y1', (d) => y(d)).attr('y2', (d) => y(d))
+      .attr('stroke', 'var(--cds-chart-grid)').attr('stroke-width', 1);
+    svg.append('g').selectAll('text').data(y.ticks(5)).join('text')
+      .attr('x', m.l - 8).attr('y', (d) => y(d)).attr('dy', '0.32em').attr('text-anchor', 'end').text((d) => `${d}×`);
+    svg.append('g').selectAll('text').data(xTicks).join('text')
+      .attr('x', (d) => x(d)).attr('y', H - 6).attr('text-anchor', 'middle').text(label);
+    svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', H - m.b).attr('y2', H - m.b).attr('stroke', 'var(--cds-chart-axis)');
+    svg.append('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', y(1)).attr('y2', y(1))
+      .attr('stroke', 'var(--cds-chart-reference)').attr('stroke-dasharray', '3 3');
+    const series = [{ key: 'vol', color: dash.colors[1] }, { key: 'rng', color: dash.colors[0] }];
+    series.forEach((s) => svg.append('path').datum(rows).attr('fill', 'none').attr('stroke', s.color).attr('stroke-width', 2)
+      .attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round').attr('d', d3.line().x((r) => x(r.m)).y((r) => y(r[s.key]))));
+    let yv = y(last.vol), yr = y(last.rng);
+    if (yr - yv < 14) { const mid = (yv + yr) / 2; yv = mid - 7; yr = mid + 7; }
+    [[yv, endText[0]], [yr, endText[1]]].forEach(([yy, t]) =>
+      svg.append('text').attr('class', 'iv-endlabel').attr('x', W - m.r + 8).attr('y', yy).attr('dy', '0.32em').text(t));
+    series.forEach((s) => svg.append('circle').attr('cx', x(last.m)).attr('cy', y(last[s.key])).attr('r', 4).attr('fill', s.color)
+      .attr('stroke', 'var(--color-panel)').attr('stroke-width', 2));
+    hover(box, svg, rows, x, (r) => [[dash.colors[0], 'Price range', `${d3.format('.2f')(r.rng)}×`], [dash.colors[1], 'Volume', `${d3.format('.2f')(r.vol)}×`]],
+      [{ key: 'rng', y, color: dash.colors[0] }, { key: 'vol', y, color: dash.colors[1] }], m, H);
+  }
+
+  function hover(box, svg, rows, x, lines, dots, m, H) {
+    const el = tip(box);
+    const rule = svg.append('line').attr('y1', m.t).attr('y2', H - m.b).attr('stroke', 'var(--cds-chart-axis)').attr('opacity', 0);
+    const marks = dots.map((d) => svg.append('circle').attr('r', 4).attr('fill', d.color).attr('stroke', 'var(--color-panel)').attr('stroke-width', 2).attr('opacity', 0));
+    const vb = svg.node().viewBox.baseVal;
+    svg.append('rect').attr('x', m.l).attr('y', m.t).attr('width', vb.width - m.l - m.r).attr('height', H - m.t - m.b).attr('fill', 'transparent')
+      .on('pointermove', (ev) => {
+        const [px] = d3.pointer(ev);
+        const t = x.invert(px);
+        const r = rows[d3.minIndex(rows, (d) => Math.abs(d.m - t))];
+        rule.attr('x1', x(r.m)).attr('x2', x(r.m)).attr('opacity', 1);
+        marks.forEach((c, i) => c.attr('cx', x(r.m)).attr('cy', dots[i].y(r[dots[i].key])).attr('opacity', 1));
+        el.replaceChildren();
+        const head = document.createElement('div'); head.className = 't'; head.textContent = `${r.time} ET`; el.appendChild(head);
+        lines(r).forEach(([c, name, val]) => {
+          const row = document.createElement('div'); row.className = 'r';
+          if (c) { const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = c; row.appendChild(sw); }
+          row.appendChild(document.createTextNode(`${name} ${val}`)); el.appendChild(row);
+        });
+        el.hidden = false;
+        const scale = box.clientWidth / vb.width;
+        placeTip(box, el, x(r.m) * scale, dots[0].y(r[dots[0].key]) * scale);
+      })
+      .on('pointerleave', () => { el.hidden = true; rule.attr('opacity', 0); marks.forEach((c) => c.attr('opacity', 0)); });
+  }
+
+  function fillTable(raw) {
+    const body = document.querySelector('#profile-table tbody');
+    body.replaceChildren();
+    raw.forEach((r) => {
+      const tr = document.createElement('tr');
+      [r.time_et, d3.format('.3f')(num(r.median_range_pct)), d3.format('.3f')(num(r.median_abs_return_pct)),
+       `${d3.format('.2f')(num(r.range_vs_midday))}×`, `${d3.format('.2f')(num(r.volume_vs_midday))}×`, d3.format(',')(num(r.bars))]
+        .forEach((v) => { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); });
+      body.appendChild(tr);
+    });
+  }
+
+  const fmt = {
+    range_vs_midday: (v) => d3.format('.1f')(num(v)),
+    volume_vs_midday: (v) => d3.format('.1f')(num(v)),
+    median_range_pct: (v) => d3.format('.2f')(num(v)),
+    time_et: (v) => String(v),
+  };
+
+  dash.onData(() => {
+    const src = dash.data('profile');
+    const marks = document.querySelectorAll('[data-source="profile"][data-field], [data-source="midday_low"][data-field]');
+    if (src.status !== 'ok') {
+      marks.forEach((e) => { e.textContent = '—'; });
+      ['range-chart', 'ratio-chart'].forEach((id) => {
+        const box = document.getElementById(id);
+        if (src.status === 'error' || src.status === 'connect') fail(box); else box.innerHTML = '';
+      });
+      if (src.status !== 'loading') marks.forEach((e) => e.classList.remove('dash-skeleton'));
+      return;
+    }
+    const raw = src.data;
+    const low = dash.data('midday_low').data || [];
+    marks.forEach((e) => {
+      const f = e.dataset.field;
+      let row;
+      if (e.dataset.source === 'midday_low') row = low[Number(e.dataset.row || 0)];
+      else { const [k, v] = e.dataset.where.split('='); row = raw.find((r) => String(r[k]) === v); }
+      e.textContent = row ? (fmt[f] || String)(row[f]) : '—';
+      e.classList.remove('dash-skeleton');
+    });
+    const rows = raw.map((r) => ({ time: r.time_et, m: mins(r.time_et), range: num(r.median_range_pct), absr: num(r.median_abs_return_pct),
+                                   rng: num(r.range_vs_midday), vol: num(r.volume_vs_midday) })).sort((a, b) => a.m - b.m);
+    drawRange(rows);
+    drawRatio(rows);
+    fillTable(raw);
+  });
+})();
+</script>
+</div>
+</body>
+</html>

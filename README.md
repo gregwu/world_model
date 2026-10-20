@@ -280,11 +280,11 @@ This is the time-of-day pattern behind the correction above. Medians over 12M ra
 | 15:55 (last bar) | 0.23% | 1.8× | **12.5×** |
 
 - **The open is by far the most volatile period.** The first bar moves about 5× more than a midday bar; including the overnight gap, its median |return| is 0.50%. Volatility halves within 30 minutes and keeps decaying until about 12:30.
-- **Midday (12:30-13:30) is the quiet trough**, about a fifth of the open's activity.
+- **Midday (12:30-14:00) is the quiet trough**, about a fifth of the open's activity; the single quietest slot is 13:50 (median range 0.12%).
 - **There is a small bump at 14:00**, probably from FOMC days (announcements at 14:00 ET, about 8 times a year).
 - **The close picks up**, but only to 1.6-1.8× midday on price moves. Volume rises far more, to 12.5× midday in the last bar, as orders pile into the closing auction.
 
-So price volatility is a reverse J (high open, low midday, modest rise into the close), while volume is a strong U. This shape is why time of day alone explains 24% of next-bar |return| variance on the 2026 test set, more than the model's 64 regimes do. Regenerate it with `PYTHONPATH=src python scripts/intraday_profile.py --pack data/alpaca5m/pack` (add `--csv` for all 78 slots).
+So price volatility is a reverse J (high open, low midday, modest rise into the close), while volume is a strong U. This shape is why time of day alone explains 24% of next-bar |return| variance on the 2026 test set, more than the model's 64 regimes do. Regenerate it with `PYTHONPATH=src python scripts/intraday_profile.py --pack data/alpaca5m/pack` (add `--csv` for all 78 slots). An interactive chart of all 78 slots is in [docs/intraday_volatility_profile.html](docs/intraday_volatility_profile.html) (open it in a browser; data in `docs/intraday_volatility_profile.csv`).
 
 ### Daily model: `configs/daily.yaml`, 200 tickers
 
