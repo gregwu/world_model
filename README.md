@@ -216,7 +216,7 @@ python scripts/diagnostics.py --config configs/daily.yaml --checkpoint artifacts
 ```
 
 - **Gradient-boosting baseline:** a `HistGradientBoostingClassifier` on summary features of the same context windows (last bar, recent and full-window means, trailing volatility), predicting the sign of each horizon's return. It is compared with always predicting the training-set majority direction.
-- **Regime analysis** (with `--checkpoint`): eta², the share of variance explained by regime membership, for |future return| (volatility) and for signed future return (direction). It is compared with 64 quantile bins of trailing realized volatility. A third figure measures what regimes explain *within* those volatility bins, that is, beyond trailing volatility.
+- **Regime analysis** (with `--checkpoint`): eta², the share of variance explained by regime membership, for |future return| (volatility) and for signed future return (direction). It is compared with 64 quantile bins of trailing realized volatility. A third figure measures what regimes explain *within* those volatility bins, that is, beyond trailing volatility. For intraday packs it also reports time of day (78 five-minute slots) and time of day × 8 trailing-volatility bins, plus what regimes explain within that table. Use the time of day × volatility table as the benchmark for 5m models: trailing volatility alone ignores the open/midday/close volatility pattern.
 
 With 64 groups and no real effect, eta² is about 63 / n, which is 0.1-0.2% for these splits.
 
@@ -228,16 +228,26 @@ Run on 2026-10-19. 100.1M samples across 529 tickers (S&P 500 + the 100 most liq
 
 Validation NLL was still improving at epoch 20 (−3.29 at epoch 1, −3.85 at epoch 20), so a longer run would probably help.
 
-Share of future |return| variance explained, test 2026:
+Share of future |return| variance explained (300k-pair subsets; validation 2025 / test 2026):
 
 | Horizon (5m bars) | 1 | 3 | 12 | 78 |
 |---|---|---|---|---|
-| Regimes | **21.8%** | **25.3%** | **25.9%** | 11.3% |
-| 64 bins of trailing volatility | 4.8% | 5.8% | 6.9% | 10.5% |
-| Regimes, within volatility bins | 16.2% | 19.2% | 20.1% | 1.3% |
-| `db_2026` 5m model (20 tickers, 2026 only), for comparison | 8.2% | 11.3% | 12.8% | 11.1% |
+| Regimes (64) | 20.1 / 21.8% | 22.6 / 25.3% | 23.3 / 25.9% | 12.5 / 11.3% |
+| 64 bins of trailing volatility | 7.3 / 4.8% | 7.8 / 5.7% | 9.7 / 6.9% | 12.0 / 10.5% |
+| Time of day (78 five-minute slots) | 16.1 / 23.6% | 14.6 / 21.7% | 12.0 / 17.5% | 0.0 / 0.0% |
+| **Time of day × 8 trailing-volatility bins** | **24.4 / 31.1%** | **23.5 / 29.8%** | 21.7 / 25.5% | 10.9 / 9.1% |
+| Regimes, within time of day × volatility | 2.0 / 1.1% | 2.3 / 1.6% | 2.1 / 1.8% | 1.6 / 2.0% |
 
-**At 1-12 bars the regimes explain about 4× as much as trailing volatility**, and about twice as much as the 20-ticker `db_2026` model. Most of it is information trailing volatility doesn't have. At 78 bars (one trading day) they roughly match the benchmark. Validation 2025 shows the same pattern (20.1 / 22.6 / 23.3 / 12.5% vs 7.4 / 7.8 / 9.7 / 12.0%).
+**Correction (2026-10-20):** an earlier version of this section compared the regimes only with trailing volatility and reported that they explain "about 4× as much short-horizon volatility". That overstated them. Intraday volatility follows a strong time-of-day pattern (high at the open, low at midday, rising into the close), which the regimes mostly rediscovered and the trailing-volatility benchmark ignores.
+
+Against the fair benchmark, a simple lookup table of time of day × trailing volatility:
+
+- **At 1 bar the table beats the regimes** (31.1% vs 21.8% on test).
+- **At 3-12 bars they roughly tie.**
+- **At 78 bars (one trading day) the regimes are slightly ahead.** Time of day cancels out over a full day there.
+- **Beyond the table the regimes add 1-2%** at every horizon.
+
+So as a volatility forecaster the model adds little over the lookup table. Giving it time of day as an explicit input (step B of the ablation ladder) would force the regimes to learn something beyond the clock.
 
 | | Validation 2025 | Test 2026 |
 |---|---|---|
@@ -313,9 +323,9 @@ Run on 2026-10-19. 237,611 samples (72 daily features, 12 intraday features), 20
 | \|return\| variance explained by regimes, test | 5.3 / 9.0 / 10.0 / 5.1% | 8.2 / 11.3 / 12.8 / 11.1% | **final** |
 | Same, within trailing-volatility bins, test | 4.9 / 8.7 / 9.4 / 2.5% | 6.3 / 9.5 / 11.0 / 4.7% | **final** |
 
-For comparison, 64 bins of trailing volatility explain 3.7 / 3.9 / 4.9 / 8.9% of test |return| variance.
+For comparison, 64 bins of trailing volatility explain 3.7 / 3.9 / 4.9 / 8.9% of test |return| variance. Time of day × 8 trailing-volatility bins explains **39.2 / 35.8 / 30.2 / 7.0%**, and the regimes add only 0.7 / 0.8 / 1.2 / 5.2% within it.
 
-**The final 5m regimes beat the trailing-volatility benchmark at every horizon,** about 2-3× at 1-12 bars, and most of what they capture is information that trailing volatility doesn't have. This is the clearest evidence so far that the regimes learn something useful. v1 lost to the benchmark at 78 bars (one trading day); the final model beats it there too.
+**Correction (2026-10-20):** an earlier version said these regimes "beat the trailing-volatility benchmark at every horizon" and called that the clearest evidence that the regimes learn something useful. Measured against time of day × volatility, they are far behind at 1-12 bars. Their one notable figure is at 78 bars, 5.2% beyond the table, but it comes from 20 tickers and a single test period, and the much larger Alpaca model adds only 2.0% there.
 
 The dynamics head now matches persistence, up from 15.9% for v1. Stage 2 lowered its validation loss from 1.17 to 0.77 but never changed its top prediction away from "stay". At 5-minute resolution, which regime comes next is no more predictable than "the same one" (84% of steps stay put).
 
@@ -387,7 +397,7 @@ G  learned latent alignment between A and D/E/F
 
 Promote a new encoder only if it improves validation NLL / calibration / trading utility and then confirms once on frozen 2026.
 
-The Alpaca 5m model is now the strongest testbed: it has the intended 2016-2024 / 2025 / 2026 split, 529 tickers, and regimes that explain about 4× as much short-horizon volatility as trailing volatility. It takes hours to train, though. The daily model trains in minutes and is the quicker place to try an encoder before confirming on 5m. Since neither the world model nor the GBM baseline predicts direction, judge new encoders on regime quality and volatility explained, not only on directional accuracy.
+The Alpaca 5m model is the strongest testbed: it has the intended 2016-2024 / 2025 / 2026 split and 529 tickers. Its regimes, however, mostly capture time of day and trailing volatility (see the correction above), so step B (calendar/time embeddings) comes first, and every later encoder should be judged against the time of day × volatility table. It takes hours to train. The daily model trains in minutes and is the quicker place to try an encoder before confirming on 5m. Since neither the world model nor the GBM baseline predicts direction, judge new encoders on regime quality and volatility explained, not only on directional accuracy.
 
 ## Important modeling note
 

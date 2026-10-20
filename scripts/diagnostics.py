@@ -5,13 +5,16 @@ A. Gradient-boosting baseline: HistGradientBoostingClassifier on summary feature
    direction is not learnable from these inputs and the world model's ~50% is expected.
 B. Regime analysis (with --checkpoint): eta^2 = share of variance explained by regime membership, for
    |future return| (volatility) and signed future return (direction). Compared against 64 quantile bins
-   of trailing realized volatility, a deliberately simple benchmark the regimes should match or beat.
+   of trailing realized volatility. For intraday packs also against time of day (5-minute slot) and time of
+   day x 8 trailing-volatility bins: intraday volatility follows a strong open/midday/close pattern, and
+   without this benchmark regimes that merely learned the clock look far better than trailing volatility.
 
 Usage: PYTHONPATH=src python3 scripts/diagnostics.py --config configs/daily.yaml [--checkpoint artifacts/daily/best.pt]
 """
 from __future__ import annotations
 import argparse, json
 import numpy as np
+import pandas as pd
 import yaml
 from sklearn.ensemble import HistGradientBoostingClassifier
 from mwm.data import open_dataset
@@ -53,6 +56,12 @@ def eta_squared(values: np.ndarray, groups: np.ndarray) -> float:
 def quantile_bins(x: np.ndarray, edges_from: np.ndarray, k: int = 64) -> np.ndarray:
     edges = np.quantile(edges_from, np.linspace(0, 1, k + 1)[1:-1])
     return np.searchsorted(edges, x)
+
+
+def time_of_day(timestamps_ns: np.ndarray) -> np.ndarray:
+    """Minutes since midnight, New York time (one value per 5-minute slot)."""
+    et = pd.to_datetime(timestamps_ns, utc=True).tz_convert("America/New_York")
+    return (et.hour * 60 + et.minute).to_numpy()
 
 
 def split_ranges(cfg):
@@ -100,15 +109,24 @@ def main():
             ck, mcfg, ds, dev, model = load_checkpoint(args.checkpoint, split, args.max_eval)
             regimes = infer_regimes(model, ds, dev, mcfg["train"]["batch_size"], mcfg["train"].get("amp"))  # aligned with ds.pair_rows
             rows = ds.pair_rows; Y = ds.returns[rows]
-            vol_bins = quantile_bins(trailing_vol(raw[split], rows), train_vol)
+            vol = trailing_vol(raw[split], rows); vol_bins = quantile_bins(vol, train_vol)
+            intraday = bool(raw[split].intra_dim)
+            if intraday:
+                tod = time_of_day(ds.timestamps_ns[rows])
+                tod_vol = tod * 100 + quantile_bins(vol, train_vol, 8)  # 78 slots x 8 vol bins
             res = []
             for h in range(Y.shape[1]):
                 a = np.abs(Y[:, h])
-                res.append({"horizon_index": h,
-                            "eta2_abs_return_by_regime": eta_squared(a, regimes),
-                            "eta2_abs_return_by_vol_bins": eta_squared(a, vol_bins),
-                            "eta2_abs_return_by_regime_within_vol_bins": eta_squared(a - _group_mean(a, vol_bins), regimes),
-                            "eta2_signed_return_by_regime": eta_squared(Y[:, h], regimes)})
+                r = {"horizon_index": h,
+                     "eta2_abs_return_by_regime": eta_squared(a, regimes),
+                     "eta2_abs_return_by_vol_bins": eta_squared(a, vol_bins),
+                     "eta2_abs_return_by_regime_within_vol_bins": eta_squared(a - _group_mean(a, vol_bins), regimes),
+                     "eta2_signed_return_by_regime": eta_squared(Y[:, h], regimes)}
+                if intraday:
+                    r.update({"eta2_abs_return_by_time_of_day": eta_squared(a, tod),
+                              "eta2_abs_return_by_tod_x_vol": eta_squared(a, tod_vol),
+                              "eta2_abs_return_by_regime_within_tod_x_vol": eta_squared(a - _group_mean(a, tod_vol), regimes)})
+                res.append(r)
             report["regimes"][split] = res
             print(json.dumps({"regimes": split, "n": int(len(rows)), "results": res}), flush=True)
     return report
