@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from .data import make_loader
 from .evaluate import load_checkpoint
-from .train import to_device, encode_next_regime, autocast_for, run_model
+from .train import to_device, encode_next_regime, autocast_for
 
 
 def infer_regimes(model, ds, device, batch_size, amp=None, with_next=False):
@@ -16,7 +16,7 @@ def infer_regimes(model, ds, device, batch_size, amp=None, with_next=False):
         for b in loader:
             b=to_device(b,device)
             with autocast_for(device,amp):
-                cur.append(run_model(model,b)["regime"].cpu().numpy())
+                cur.append(model(b["daily"],b.get("intraday"),b["symbol_id"])["regime"].cpu().numpy())
             if with_next: nxt.append(encode_next_regime(model,b,amp).cpu().numpy())
     cur=np.concatenate(cur)
     return (cur,np.concatenate(nxt)) if with_next else cur
@@ -32,9 +32,8 @@ def transition_matrix(current, nxt, k):
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("--checkpoint",default="artifacts/best.pt"); ap.add_argument("--split",choices=["train","val","test"],default="train"); ap.add_argument("--out",default="artifacts/transitions.npz")
-    ap.add_argument("--max-samples",type=int,default=None,help="count a fixed random subset of pairs (large packs)")
-    ap.add_argument("--final-test",action="store_true",help="allow the test split when the config sets split.test_frozen"); args=ap.parse_args()
-    ck,cfg,ds,dev,model=load_checkpoint(args.checkpoint,args.split,args.max_samples,args.final_test)
+    ap.add_argument("--max-samples",type=int,default=None,help="count a fixed random subset of pairs (large packs)"); args=ap.parse_args()
+    ck,cfg,ds,dev,model=load_checkpoint(args.checkpoint,args.split,args.max_samples)
     current,nxt=infer_regimes(model,ds,dev,cfg["train"]["batch_size"],cfg["train"].get("amp"),with_next=True)
     mat,probs=transition_matrix(current,nxt,cfg["model"]["num_regimes"])
     np.savez_compressed(args.out,counts=mat,probs=probs)
