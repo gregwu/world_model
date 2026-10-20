@@ -1,0 +1,52 @@
+# Pure 5-minute v0.2 experiment. Reuses the existing Alpaca lazy pack; daily windows remain
+# on disk for compatibility but IntradayWorldModel never consumes them.
+seed: 42
+
+data:
+  out_path: data/alpaca5m/pack
+
+split:
+  train_start: "2016-01-01"
+  train_end: "2024-12-31"
+  val_start: "2025-01-01"
+  val_end: "2025-12-31"
+  test_start: "2026-01-01"
+  test_end: "2026-12-31"
+
+model:
+  d_model: 128
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 256
+  dropout: 0.10
+  short_bars: 12
+  session_bars: 78
+  multi_bars: 455
+  latent_dim: 64
+  num_regimes: 64
+  vq_temperature: 0.1
+  vq_dead_threshold: 0.001
+  stock_embedding_dim: 32
+  dynamics_hidden: 128
+  return_hidden: 128
+
+train:
+  batch_size: 512
+  epochs: 20
+  samples_per_epoch: 1000000
+  val_max_samples: 200000
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  patience: 4
+  amp: bf16
+  device: auto
+  num_workers: 4
+  checkpoint: artifacts/alpaca5m_pure/best.pt
+
+loss:
+  return_weight: 1.0
+  dynamics_weight: 0.5
+  vq_weight: 0.25
+  entropy_weight: 0.1
+  relative_weight: 0.5
